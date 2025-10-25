@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         ChatGPT 对话导航
 // @namespace    http://tampermonkey.net/
-// @version      3.1
-// @description  紧凑导航 + 实时定位；修复边界误判；底部纯箭头按钮；回到顶部/到底部单击即用；禁用面板内双击选中；快捷键 Cmd+↑/↓（Mac）或 Alt+↑/↓（Windows）；修复竞态条件和流式输出检测问题；感谢loongphy佬适配暗色模式（3.0）
-// @author       schweigen, loongphy (3.0暗色模式)
+// @version      4.0
+// @description  紧凑导航 + 实时定位；修复边界误判；底部纯箭头按钮；回到顶部/到底部单击即用；禁用面板内双击选中；快捷键 Cmd+↑/↓（Mac）或 Alt+↑/↓（Windows）；修复竞态条件和流式输出检测问题；感谢loongphy佬适配暗色模式（3.0），加入标记点📌功能和收藏夹功能（4.0大更新）
+// @author       schweigen, loongphy(在3.0版本帮忙加入暗色模式)
 // @license      MIT
 // @match        https://chatgpt.com/*
 // @match        https://chatgpt.com/?model=*
@@ -25,6 +25,20 @@
   const CONFIG = { maxPreviewLength: 12, animation: 250, refreshInterval: 2000, forceRefreshInterval: 10000, anchorOffset: 8 };
   const BOUNDARY_EPS = 28;
   const DEBUG = false;
+  // 存储键与检查点状态
+  const STORE_NS = 'cgpt-quicknav';
+  const WIDTH_KEY = `${STORE_NS}:nav-width`;
+  const CP_KEY_PREFIX = `${STORE_NS}:cp:`; // + 会话 key
+  const CP_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 检查点保留 30 天
+  let cpSet = new Set();          // 仅用于快速 membership（遗留）
+  let cpMap = new Map();          // pinId -> meta
+  // 收藏夹（favorites）
+  const FAV_KEY_PREFIX = `${STORE_NS}:fav:`;         // + 会话 key
+  const FAV_FILTER_PREFIX = `${STORE_NS}:fav-filter:`; // + 会话 key
+  const FAV_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 收藏保留 30 天
+  let favSet = new Set();         // 收藏的 key（消息 msgKey 或 图钉 pinId）
+  let favMeta = new Map();        // key -> { created }
+  let filterFav = false;          // 是否只显示收藏
 
   // 全局调试函数，用户可在控制台调用
   window.chatGptNavDebug = {
@@ -98,6 +112,8 @@
   };
 
   GM_registerMenuCommand("重置问题栏位置", resetPanelPosition);
+  GM_registerMenuCommand("清理过期检查点（30天）", cleanupExpiredCheckpoints);
+  GM_registerMenuCommand("清理无效收藏", cleanupInvalidFavorites);
   function resetPanelPosition() {
     const nav = document.getElementById('cgpt-compact-nav');
     if (nav) {
@@ -113,6 +129,43 @@
         nav.style.background = originalBg;
         nav.style.outline = originalOutline;
       }, 500);
+    }
+  }
+  function cleanupExpiredCheckpoints() {
+    try {
+      loadCPSet();
+      const removed = runCheckpointGC(true);
+      const nav = document.getElementById('cgpt-compact-nav');
+      if (nav && nav._ui) {
+        renderList(nav._ui);
+      }
+      if (typeof alert === 'function') {
+        alert(removed > 0 ? `已清理 ${removed} 条过期检查点（>30天）` : '无过期检查点需要清理');
+      } else {
+        console.log('清理结果：', removed > 0 ? `清理 ${removed} 条` : '无过期检查点');
+      }
+    } catch (e) {
+      console.error('清理过期检查点失败:', e);
+    }
+  }
+
+  function cleanupInvalidFavorites() {
+    try {
+      loadFavSet();
+      // 计算有效 key：当前对话项 + 现存的图钉ID
+      const valid = new Set();
+      try { const base = buildIndex(); base.forEach(i => valid.add(i.key)); } catch {}
+      try { loadCPSet(); cpMap.forEach((_, pid) => valid.add(pid)); } catch {}
+      const removed = runFavoritesGC(true, valid);
+      const nav = document.getElementById('cgpt-compact-nav');
+      if (nav && nav._ui) { updateStarBtnState(nav._ui); renderList(nav._ui); }
+      if (typeof alert === 'function') {
+        alert(removed > 0 ? `已清理 ${removed} 个无效收藏` : '无无效收藏需要清理');
+      } else {
+        console.log('收藏清理结果：', removed > 0 ? `清理 ${removed} 个` : '无无效收藏');
+      }
+    } catch (e) {
+      console.error('清理无效收藏失败:', e);
     }
   }
 
@@ -182,6 +235,7 @@
         observeChat(ui);
         bindActiveTracking();
         watchSendEvents(ui); // 新增这一行
+        bindAltPin(ui); // 绑定 Option+单击添加📌
         scheduleRefresh(ui);
         if (DEBUG || window.DEBUG_TEMP) console.log('ChatGPT Navigation: 面板创建完成');
       } finally {
@@ -332,14 +386,9 @@
     if (!el) return '';
     const text = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
     if (!text) return '...';
-    let width = 0, result = '';
-    for (let i = 0; i < text.length; i++) {
-      const char = text[i];
-      const charWidth = /[\u4e00-\u9fa5]/.test(char) ? 2 : 1;
-      if (width + charWidth > CONFIG.maxPreviewLength) { result += '…'; break; }
-      result += char; width += charWidth;
-    }
-    return result || text.slice(0, CONFIG.maxPreviewLength) || '...';
+    // 让 CSS 负责根据宽度省略，JS 只做上限裁剪以防极端超长文本
+    const HARD_CAP = 600;
+    return text.length > HARD_CAP ? text.slice(0, HARD_CAP) : text;
   }
 
   function buildIndex() {
@@ -407,7 +456,8 @@
       if (!el.id) el.id = `cgpt-turn-${i + 1}`;
       const role = isUser ? 'user' : 'assistant';
       const seq = isUser ? ++u : ++a;
-      list.push({ id: el.id, idx: i, role, preview, seq });
+      const msgKey = el.getAttribute('data-message-id') || el.getAttribute('data-testid') || el.id;
+      list.push({ id: el.id, key: msgKey, idx: i, role, preview, seq });
     }
 
     if (DEBUG) console.log(`ChatGPT Navigation: 成功识别 ${list.length} 个对话 (用户: ${u}, 助手: ${a})`);
@@ -472,34 +522,52 @@ body[data-theme='dark'] #cgpt-compact-nav { color-scheme: dark; }
 html[data-theme='light'] #cgpt-compact-nav,
 body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
 
-#cgpt-compact-nav { position: fixed; top: 60px; right: 10px; width: auto; min-width: 80px; max-width: 210px; z-index: 2147483647 !important; font-family: var(--cgpt-nav-font); font-size: 13px; pointer-events: auto; background: transparent; -webkit-user-select:none; user-select:none; -webkit-tap-highlight-color: transparent; color: var(--cgpt-nav-text-strong); color-scheme: light dark; }
+#cgpt-compact-nav { position: fixed; top: 60px; right: 10px; width: var(--cgpt-nav-width, auto); min-width: 80px; max-width: var(--cgpt-nav-width, 210px); z-index: 2147483647 !important; font-family: var(--cgpt-nav-font); font-size: 13px; pointer-events: auto; background: transparent; -webkit-user-select:none; user-select:none; -webkit-tap-highlight-color: transparent; color: var(--cgpt-nav-text-strong); color-scheme: light dark; }
 #cgpt-compact-nav * { -webkit-user-select:none; user-select:none; }
 .compact-header { display:flex; align-items:center; justify-content:space-between; padding:4px 8px; margin-bottom:4px; background:var(--cgpt-nav-panel-bg); border-radius:var(--cgpt-nav-radius-lg); border:1px solid var(--cgpt-nav-panel-border); pointer-events:auto; cursor:move; box-shadow:var(--cgpt-nav-panel-shadow); min-width:100px; backdrop-filter:saturate(180%) blur(18px); }
 .compact-title { font-size:11px; font-weight:600; color:var(--cgpt-nav-text-muted); display:flex; align-items:center; gap:3px; text-transform:uppercase; letter-spacing:.04em; }
 .compact-title span { color:var(--cgpt-nav-text-strong); }
 .compact-title svg { width:12px; height:12px; opacity:.55; }
-.compact-toggle, .compact-refresh { background:var(--cgpt-nav-item-bg); border:1px solid var(--cgpt-nav-border-muted); color:var(--cgpt-nav-text-strong); cursor:pointer; width:26px; height:26px; display:flex; align-items:center; justify-content:center; border-radius:var(--cgpt-nav-radius); transition:all .2s ease; font-weight:600; line-height:1; box-shadow:var(--cgpt-nav-item-shadow); backdrop-filter:saturate(180%) blur(18px); }
-.compact-toggle { font-size:18px; }
-.compact-refresh { font-size:14px; margin-left:4px; }
+.compact-toggle, .compact-refresh { background:var(--cgpt-nav-item-bg); border:1px solid var(--cgpt-nav-border-muted); color:var(--cgpt-nav-text-strong); cursor:pointer; width:clamp(20px, calc(var(--cgpt-nav-width, 210px) / 10), 26px); height:clamp(20px, calc(var(--cgpt-nav-width, 210px) / 10), 26px); display:flex; align-items:center; justify-content:center; border-radius:var(--cgpt-nav-radius); transition:all .2s ease; font-weight:600; line-height:1; box-shadow:var(--cgpt-nav-item-shadow); backdrop-filter:saturate(180%) blur(18px); }
+.compact-toggle { font-size:clamp(14px, calc(var(--cgpt-nav-width, 210px) / 14), 18px); }
+.compact-refresh { font-size:clamp(12px, calc(var(--cgpt-nav-width, 210px) / 18), 14px); margin-left:4px; }
 .compact-toggle:hover, .compact-refresh:hover { border-color:var(--cgpt-nav-accent-subtle); color:var(--cgpt-nav-accent); box-shadow:0 4px 14px rgba(147,51,234,0.12); background:var(--cgpt-nav-item-hover-bg); }
 .compact-toggle:active, .compact-refresh:active { transform:scale(.94); }
-.toggle-text { display:block; font-family:monospace; font-size:16px; }
-.compact-list { max-height:400px; overflow-y:auto; overflow-x:hidden; padding:0; pointer-events:auto; display:flex; flex-direction:column; gap:8px; scrollbar-width:thin; scrollbar-color:var(--cgpt-nav-scrollbar-thumb) transparent; }
+.toggle-text { display:block; font-family:monospace; font-size:clamp(12px, calc(var(--cgpt-nav-width, 210px) / 14), 16px); }
+  .compact-list { max-height:400px; overflow-y:auto; overflow-x:hidden; padding:0; pointer-events:auto; display:flex; flex-direction:column; gap:8px; scrollbar-width:thin; scrollbar-color:var(--cgpt-nav-scrollbar-thumb) transparent; }
 .compact-list::-webkit-scrollbar { width:3px; }
 .compact-list::-webkit-scrollbar-thumb { background:var(--cgpt-nav-scrollbar-thumb); border-radius:2px; }
 .compact-list::-webkit-scrollbar-thumb:hover { background:var(--cgpt-nav-scrollbar-thumb-hover); }
-.compact-item { display:block; padding:3px 8px; margin:0; border-radius:var(--cgpt-nav-radius); cursor:pointer; transition:all .16s ease; font-size:12px; line-height:1.4; min-height:20px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; pointer-events:auto; background:var(--cgpt-nav-item-bg); box-shadow:var(--cgpt-nav-item-shadow); width:auto; min-width:60px; max-width:190px; color:var(--cgpt-nav-text-strong); border:1px solid transparent; }
+.compact-item { display:block; padding:3px 8px; margin:0; border-radius:var(--cgpt-nav-radius); cursor:pointer; transition:all .16s ease; font-size:12px; line-height:1.4; min-height:20px; white-space:nowrap; overflow:hidden; /* 省略号交给 .compact-text */ pointer-events:auto; background:var(--cgpt-nav-item-bg); box-shadow:var(--cgpt-nav-item-shadow); width:auto; min-width:60px; max-width: calc(var(--cgpt-nav-width, 210px) - 20px); color:var(--cgpt-nav-text-strong); border:1px solid transparent; position:relative; padding-right:26px; }
 .compact-item:hover { background:var(--cgpt-nav-item-hover-bg); transform:translateX(2px); box-shadow:0 6px 16px rgba(15,23,42,0.12); }
 .compact-item.user { color:var(--cgpt-nav-positive); border-color:var(--cgpt-nav-positive); border-color:color-mix(in srgb, var(--cgpt-nav-positive) 45%, transparent); }
 .compact-item.assistant { color:var(--cgpt-nav-info); border-color:var(--cgpt-nav-info); border-color:color-mix(in srgb, var(--cgpt-nav-info) 45%, transparent); }
 .compact-item.active { outline:2px solid var(--cgpt-nav-accent); background:var(--cgpt-nav-accent-subtle); box-shadow:0 0 0 1px var(--cgpt-nav-accent-strong) inset, 0 12px 30px rgba(147,51,234,0.15); border-color:var(--cgpt-nav-accent-subtle); transform:translateX(2px); }
-.compact-text { display:inline-block; }
+.compact-item.pin { color:var(--cgpt-nav-accent); border-color:color-mix(in srgb, var(--cgpt-nav-accent) 45%, transparent); }
+.pin-label { font-weight:600; margin-right:4px; }
+.compact-text { display:inline-block; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; vertical-align:bottom; }
 .compact-number { display:inline-block; margin-right:4px; font-weight:600; color:var(--cgpt-nav-text-muted); font-size:11px; }
 .compact-empty { padding:10px; text-align:center; color:var(--cgpt-nav-text-muted); font-size:11px; background:var(--cgpt-nav-panel-bg); border-radius:var(--cgpt-nav-radius-lg); pointer-events:auto; min-height:20px; line-height:1.4; border:1px dashed var(--cgpt-nav-border-muted); }
 
+/* 收藏与锚点 */
+  .compact-star { background:var(--cgpt-nav-item-bg); border:1px solid var(--cgpt-nav-border-muted); color:var(--cgpt-nav-text-strong); cursor:pointer; width:clamp(20px, calc(var(--cgpt-nav-width, 210px) / 10), 26px); height:clamp(20px, calc(var(--cgpt-nav-width, 210px) / 10), 26px); display:flex; align-items:center; justify-content:center; border-radius:var(--cgpt-nav-radius); transition:all .2s ease; font-weight:600; line-height:1; box-shadow:var(--cgpt-nav-item-shadow); backdrop-filter:saturate(180%) blur(18px); font-size:clamp(12px, calc(var(--cgpt-nav-width, 210px) / 14), 16px); margin-left:4px; }
+  .compact-star:hover { border-color:var(--cgpt-nav-accent-subtle); color:var(--cgpt-nav-accent); box-shadow:0 4px 14px rgba(147,51,234,0.12); background:var(--cgpt-nav-item-hover-bg); }
+  .compact-star.active { background:var(--cgpt-nav-accent-subtle); color:var(--cgpt-nav-accent); border-color:var(--cgpt-nav-accent-subtle); }
+  .fav-toggle { position:absolute; right:6px; top:2px; border:none; background:transparent; color:var(--cgpt-nav-text-muted); cursor:pointer; font-size:12px; line-height:1; padding:2px; opacity:.7; }
+  .fav-toggle:hover { color:var(--cgpt-nav-accent); opacity:1; }
+  .fav-toggle.active { color:var(--cgpt-nav-accent); opacity:1; }
+/* 锚点占位 */
+  .cgpt-pin-anchor { display:inline-block; width:0; height:0; margin:0; padding:0; border:0; outline:0; overflow:visible; vertical-align:middle; }
+  .cgpt-pin-anchor::after { content:'📌'; font-size:2.4em; line-height:1; margin-left:4px; opacity:.65; color:var(--cgpt-nav-accent); cursor:pointer; }
+  .cgpt-pin-anchor:hover::after { opacity:1; transform:translateY(-1px); }
+
+/* 调整宽度手柄 */
+.cgpt-resize-handle { position:absolute; left:-5px; top:0; bottom:0; width:8px; cursor:ew-resize; background:transparent; }
+.cgpt-resize-handle::after { content:''; position:absolute; left:2px; top:25%; bottom:25%; width:2px; background: var(--cgpt-nav-border-muted); border-radius:1px; opacity:.6; }
+
 /* 底部导航条 */
-.compact-footer { margin-top:6px; display:flex; gap:6px; }
-.nav-btn { flex:1 1 auto; padding:6px 8px; font-size:14px; border-radius:var(--cgpt-nav-radius-lg); border:1px solid var(--cgpt-nav-border-muted); background:var(--cgpt-nav-footer-bg); cursor:pointer; box-shadow:var(--cgpt-nav-item-shadow); line-height:1; color:var(--cgpt-nav-text-strong); transition:all .18s ease; backdrop-filter:saturate(180%) blur(18px); }
+.compact-footer { margin-top:6px; display:flex; gap:clamp(3px, calc(var(--cgpt-nav-width, 210px) / 70), 6px); }
+.nav-btn { flex:1 1 auto; padding: clamp(4px, calc(var(--cgpt-nav-width, 210px) / 56), 6px) clamp(6px, calc(var(--cgpt-nav-width, 210px) / 35), 8px); font-size: clamp(12px, calc(var(--cgpt-nav-width, 210px) / 14), 14px); border-radius:var(--cgpt-nav-radius-lg); border:1px solid var(--cgpt-nav-border-muted); background:var(--cgpt-nav-footer-bg); cursor:pointer; box-shadow:var(--cgpt-nav-item-shadow); line-height:1; color:var(--cgpt-nav-text-strong); transition:all .18s ease; backdrop-filter:saturate(180%) blur(18px); }
 .nav-btn:hover { background:var(--cgpt-nav-footer-hover); transform:translateY(-1px); }
 .nav-btn:active { transform: translateY(1px); }
 
@@ -507,9 +575,32 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
 .nav-btn.arrow { background:var(--cgpt-nav-accent-subtle); border-color:var(--cgpt-nav-accent-subtle); color:var(--cgpt-nav-accent); font-weight:600; }
 .nav-btn.arrow:hover { background:var(--cgpt-nav-accent-strong); border-color:var(--cgpt-nav-accent-strong); color:var(--token-text-on-accent, #ffffff); box-shadow:0 8px 24px rgba(147,51,234,0.25); }
 
+/* 极窄模式布局：(顶)[ ↑ ][ ↓ ](底) */
+#cgpt-compact-nav.narrow .compact-footer {
+  display: grid;
+  grid-template-columns:
+    minmax(12px, clamp(14px, calc(var(--cgpt-nav-width, 210px) / 12), 18px))
+    1fr 1fr
+    minmax(12px, clamp(14px, calc(var(--cgpt-nav-width, 210px) / 12), 18px));
+  align-items: stretch;
+  gap: clamp(3px, calc(var(--cgpt-nav-width, 210px) / 70), 6px);
+}
+#cgpt-compact-nav.narrow #cgpt-nav-top,
+#cgpt-compact-nav.narrow #cgpt-nav-bottom {
+  padding: clamp(4px, calc(var(--cgpt-nav-width, 210px) / 56), 6px) 4px;
+  font-size: clamp(12px, calc(var(--cgpt-nav-width, 210px) / 18), 14px);
+  justify-self: stretch;
+  align-self: stretch;
+}
+#cgpt-compact-nav.narrow #cgpt-nav-prev,
+#cgpt-compact-nav.narrow #cgpt-nav-next {
+  width: auto;
+  min-width: 34px;
+}
+
 /* 移动端 */
 @media (max-width: 768px) {
-  #cgpt-compact-nav { right:5px; max-width:160px; }
+  #cgpt-compact-nav { right:5px; }
   .compact-item { font-size:11px; padding:2px 5px; min-height:18px; }
   .nav-btn { padding:5px 6px; font-size:13px; }
 }
@@ -550,12 +641,7 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
         <div style="display: flex; align-items: center; gap: 4px;">
           <button class="compact-toggle" type="button" title="收起/展开"><span class="toggle-text">−</span></button>
           <button class="compact-refresh" type="button" title="刷新对话列表">⟳</button>
-        </div>
-        <div class="compact-title" aria-live="polite" aria-atomic="true">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/>
-          </svg>
-          <span>问题栏</span>
+          <button class="compact-star" type="button" title="仅显示收藏">☆</button>
         </div>
       </div>
       <div class="compact-list" role="listbox" aria-label="对话项"></div>
@@ -568,6 +654,10 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
     `;
     document.body.appendChild(nav);
     enableDrag(nav);
+    enableResize(nav);
+    enableResponsiveClasses(nav);
+    initCheckpoints(nav);
+    applySavedWidth(nav);
 
     // 禁用面板内双击与文本选中
     nav.addEventListener('dblclick', (e) => { e.preventDefault(); e.stopPropagation(); }, { capture: true });
@@ -578,20 +668,239 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
     return { nav };
   }
 
+  function enableResponsiveClasses(nav) {
+    try {
+      const ro = new ResizeObserver((entries) => {
+        const r = entries[0].contentRect;
+        const w = r ? r.width : nav.getBoundingClientRect().width;
+        nav.classList.toggle('narrow', w <= 160);
+      });
+      ro.observe(nav);
+      nav._ro = ro;
+    } catch {}
+  }
+
   function enableDrag(nav) {
     const header = nav.querySelector('.compact-header');
-    let isDragging = false, startX, startY, startLeft, startTop;
+    let isDragging = false, startX, startY, startRight, startTop;
     header.addEventListener('mousedown', (e) => {
-      if (e.target.closest('.compact-toggle')) return;
+      if (e.target.closest('.compact-toggle, .compact-refresh, .compact-star')) return;
       isDragging = true; startX = e.clientX; startY = e.clientY;
-      const rect = nav.getBoundingClientRect(); startLeft = rect.left; startTop = rect.top; e.preventDefault();
+      const rect = nav.getBoundingClientRect();
+      startTop = rect.top;
+      startRight = Math.max(0, window.innerWidth - rect.right);
+      e.preventDefault();
     });
     document.addEventListener('mousemove', (e) => {
       if (!isDragging) return;
       const dx = e.clientX - startX, dy = e.clientY - startY;
-      nav.style.left = `${startLeft + dx}px`; nav.style.top = `${startTop + dy}px`; nav.style.right = 'auto';
+      const newRight = Math.max(0, startRight - dx);
+      nav.style.right = `${newRight}px`;
+      nav.style.left = 'auto';
+      nav.style.top = `${startTop + dy}px`;
     });
     document.addEventListener('mouseup', () => { isDragging = false; });
+  }
+
+  // ===== 检查点与宽度调整 =====
+  function getConvKey() { try { return location.pathname || 'root'; } catch { return 'root'; } }
+
+  function loadCPSet() {
+    try {
+      const key = CP_KEY_PREFIX + getConvKey();
+      const obj = GM_getValue ? GM_getValue(key, {}) : (JSON.parse(localStorage.getItem(key) || '{}'));
+      cpMap = new Map();
+      for (const k of Object.keys(obj || {})) {
+        const v = obj[k];
+        if (v && typeof v === 'object' && v.anchorId && v.msgKey) {
+          // 保留新增字段：frac 和 ctx，用于字符级精确还原
+          cpMap.set(k, {
+            msgKey: v.msgKey,
+            anchorId: v.anchorId,
+            created: v.created || Date.now(),
+            frac: (typeof v.frac === 'number' ? v.frac : undefined),
+            ctx: v.ctx || null
+          });
+        } else {
+          // 兼容旧数据：仅时间戳，视为无 anchor 的过期项
+          const ts = (typeof v === 'number' && isFinite(v)) ? v : Date.now();
+          cpMap.set(k, { msgKey: k, anchorId: null, created: ts });
+        }
+      }
+    } catch {
+      cpMap = new Map();
+    }
+  }
+
+  function saveCPSet() {
+    try {
+      const key = CP_KEY_PREFIX + getConvKey();
+      const obj = {};
+      cpMap.forEach((meta, k) => { obj[k] = meta; });
+      if (GM_setValue) GM_setValue(key, obj);
+      else localStorage.setItem(key, JSON.stringify(obj));
+    } catch {}
+  }
+
+  // ===== 收藏夹存取 =====
+  function getFavKeys() { return FAV_KEY_PREFIX + getConvKey(); }
+  function getFavFilterKey() { return FAV_FILTER_PREFIX + getConvKey(); }
+  function loadFavSet() {
+    try {
+      const key = getFavKeys();
+      const obj = GM_getValue ? GM_getValue(key, {}) : (JSON.parse(localStorage.getItem(key) || '{}'));
+      favSet = new Set();
+      favMeta = new Map();
+      for (const k of Object.keys(obj || {})) {
+        const v = obj[k];
+        const created = (v && typeof v === 'object' && typeof v.created === 'number') ? v.created : (typeof v === 'number' ? v : Date.now());
+        favSet.add(k);
+        favMeta.set(k, { created });
+      }
+    } catch { favSet = new Set(); favMeta = new Map(); }
+  }
+  function saveFavSet() {
+    try {
+      const key = getFavKeys();
+      const obj = {};
+      for (const k of favSet.values()) {
+        const meta = favMeta.get(k) || { created: Date.now() };
+        obj[k] = { created: meta.created };
+      }
+      if (GM_setValue) GM_setValue(key, obj);
+      else localStorage.setItem(key, JSON.stringify(obj));
+    } catch {}
+  }
+  function loadFavFilterState() {
+    try {
+      const k = getFavFilterKey();
+      filterFav = GM_getValue ? !!GM_getValue(k, false) : (localStorage.getItem(k) === '1');
+    } catch { filterFav = false; }
+  }
+  function saveFavFilterState() {
+    try {
+      const k = getFavFilterKey();
+      if (GM_setValue) GM_setValue(k, !!filterFav);
+      else localStorage.setItem(k, filterFav ? '1' : '0');
+    } catch {}
+  }
+  function toggleFavorite(key) {
+    if (!key) return;
+    if (!favSet || !(favSet instanceof Set)) loadFavSet();
+    if (favSet.has(key)) { favSet.delete(key); favMeta.delete(key); }
+    else { favSet.add(key); favMeta.set(key, { created: Date.now() }); }
+    saveFavSet();
+  }
+
+  // 过滤状态与收藏开关已移除
+
+  function runCheckpointGC(saveAfter = false) {
+    let removed = 0;
+    const now = Date.now();
+    for (const [k, v] of Array.from(cpMap.entries())) {
+      const created = (v && typeof v === 'object') ? (v.created || 0) : (typeof v === 'number' ? v : 0);
+      if (!created || (now - created) > CP_TTL_MS) {
+        cpMap.delete(k);
+        removed++;
+      }
+    }
+    if (removed && saveAfter) saveCPSet();
+    // 顺带移除已失效图钉的收藏
+    let favRemoved = 0;
+    try {
+      if (favSet && favSet.size) {
+        for (const key of Array.from(favSet.values())) {
+          if (typeof key === 'string' && key.startsWith('pin-') && !cpMap.has(key)) {
+            favSet.delete(key);
+            favMeta.delete(key);
+            favRemoved++;
+          }
+        }
+        if (favRemoved) saveFavSet();
+      }
+    } catch {}
+    return removed;
+  }
+
+  // 星标过滤按钮已移除
+
+  function initCheckpoints(nav) {
+    loadCPSet();
+    runCheckpointGC(true);
+    loadFavSet();
+    loadFavFilterState();
+    updateStarBtnState({ nav });
+  }
+
+  function applySavedWidth(nav) {
+    try {
+      const w = GM_getValue ? GM_getValue(WIDTH_KEY, 0) : parseInt(localStorage.getItem(WIDTH_KEY) || '0', 10);
+      if (w && w >= 100 && w <= 480) {
+        nav.style.setProperty('--cgpt-nav-width', `${w}px`);
+      } else {
+        if (window.matchMedia && window.matchMedia('(max-width: 768px)').matches) {
+          nav.style.setProperty('--cgpt-nav-width', '160px');
+        } else {
+          nav.style.setProperty('--cgpt-nav-width', '210px');
+        }
+      }
+    } catch {}
+  }
+
+  function saveWidth(px) {
+    try {
+      if (GM_setValue) GM_setValue(WIDTH_KEY, px);
+      else localStorage.setItem(WIDTH_KEY, String(px));
+    } catch {}
+  }
+
+  function enableResize(nav) {
+    const handle = document.createElement('div');
+    handle.className = 'cgpt-resize-handle';
+    nav.appendChild(handle);
+
+    let startX = 0; let startW = 0; let resizing = false; let startRight = 0; let startLeft = 0;
+    const MIN_W = 100, MAX_W = 480;
+
+    const onMove = (e) => {
+      if (!resizing) return;
+      const dx = e.clientX - startX; // 把手在左侧，向左拖动是负数 -> 增加宽度
+      // 基于左侧把手：宽度随dx变化，同时保持右边界不动
+      let w = startW - dx; // 向右拖动(正)减小宽度，向左拖动(负)增大宽度
+      w = Math.max(MIN_W, Math.min(MAX_W, w));
+      const newLeft = startRight - w; // 右边界固定在按下时的位置
+      nav.style.left = `${Math.round(newLeft)}px`;
+      nav.style.right = 'auto';
+      nav.style.setProperty('--cgpt-nav-width', `${Math.round(w)}px`);
+    };
+    const onUp = (e) => {
+      if (!resizing) return;
+      resizing = false;
+      document.removeEventListener('mousemove', onMove, true);
+      document.removeEventListener('mouseup', onUp, true);
+      const comp = getComputedStyle(nav);
+      const w = parseFloat((comp.getPropertyValue('--cgpt-nav-width') || '').replace('px','')) || nav.getBoundingClientRect().width;
+      saveWidth(Math.round(w));
+    };
+
+    handle.addEventListener('mousedown', (e) => {
+      e.preventDefault(); e.stopPropagation();
+      resizing = true;
+      startX = e.clientX;
+      const rect = nav.getBoundingClientRect();
+      startW = rect.width;
+      startRight = rect.right;
+      startLeft = rect.left;
+      document.addEventListener('mousemove', onMove, true);
+      document.addEventListener('mouseup', onUp, true);
+    }, true);
+
+    handle.addEventListener('dblclick', (e) => {
+      e.preventDefault(); e.stopPropagation();
+      const def = (window.matchMedia && window.matchMedia('(max-width: 768px)').matches) ? 160 : 210;
+      nav.style.setProperty('--cgpt-nav-width', `${def}px`);
+      saveWidth(def);
+    }, true);
   }
 
   let cacheIndex = [];
@@ -599,21 +908,63 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
   function renderList(ui) {
     const list = ui.nav.querySelector('.compact-list');
     if (!list) return;
-    const next = cacheIndex;
-    if (!next.length) { list.innerHTML = `<div class="compact-empty">暂无对话</div>`; return; }
+    const removed = runCheckpointGC(false);
+    if (removed) { saveCPSet(); }
+    // 清理已失效的收藏（不再存在的消息或图钉）
+    const nextFull = cacheIndex;
+    const validKeys = new Set(nextFull.map(i => i.key));
+    const favRemoved = runFavoritesGC(false, validKeys);
+    if (favRemoved) updateStarBtnState(ui);
+    const next = filterFav ? nextFull.filter(it => favSet.has(it.key)) : nextFull;
+    if (!next.length) { list.innerHTML = `<div class="compact-empty">${filterFav ? '暂无收藏' : '暂无对话'}</div>`; return; }
     list.innerHTML = '';
     for (const item of next) {
       const node = document.createElement('div');
-      node.className = `compact-item ${item.role}`;
+      const fav = favSet.has(item.key);
+      node.className = `compact-item ${item.role} ${fav ? 'has-fav' : ''}`;
       node.dataset.id = item.id;
-      node.innerHTML = `<span class="compact-number">${item.idx + 1}.</span><span class="compact-text" title="${escapeAttr(item.preview)}">${escapeHtml(item.preview)}</span>`;
+      node.dataset.key = item.key;
+      if (item.role === 'pin') {
+        node.classList.add('pin');
+        node.title = 'Option+单击删除📌';
+        node.innerHTML = `<span class="pin-label">${escapeHtml(item.preview)}</span><button class="fav-toggle ${fav ? 'active' : ''}" type="button" title="收藏/取消收藏">★</button>`;
+      } else {
+        node.innerHTML = `<span class="compact-number">${item.idx + 1}.</span><span class="compact-text" title="${escapeAttr(item.preview)}">${escapeHtml(item.preview)}</span><button class="fav-toggle ${fav ? 'active' : ''}" type="button" title="收藏/取消收藏">★</button>`;
+      }
       node.setAttribute('draggable', 'false');
       list.appendChild(node);
     }
     if (!list._eventBound) {
       list.addEventListener('click', (e) => {
+        // 行内收藏切换
+        const star = e.target.closest('.fav-toggle');
+        if (star) {
+          e.stopPropagation();
+          const row = star.closest('.compact-item');
+          if (row) {
+            const key = row.dataset.key;
+            toggleFavorite(key);
+            updateStarBtnState(ui);
+            renderList(ui);
+          }
+          return;
+        }
         const item = e.target.closest('.compact-item');
         if (!item) return;
+        // 删除📌：Option+单击在📌行
+        if (e.altKey && item.classList.contains('pin')) {
+          const pinId = item.dataset.key;
+          if (pinId && cpMap.has(pinId)) {
+            const meta = cpMap.get(pinId);
+            // 尝试移除旧锚点
+            try { const old = document.getElementById(meta.anchorId); if (old) old.remove(); } catch {}
+            cpMap.delete(pinId);
+            if (favSet.has(pinId)) { favSet.delete(pinId); favMeta.delete(pinId); saveFavSet(); updateStarBtnState(ui); }
+            saveCPSet();
+            renderList(ui);
+            return;
+          }
+        }
         const el = document.getElementById(item.dataset.id);
         if (el) {
           setActiveTurn(item.dataset.id);
@@ -626,11 +977,165 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
   }
 
   function refreshIndex(ui) {
-    const next = buildIndex();
-    if (DEBUG) console.log('ChatGPT Navigation: turns', next.length);
+    const base = buildIndex();
+    const next = composeWithPins(base);
+    if (DEBUG) console.log('ChatGPT Navigation: turns', next.length, '(含📌)');
     lastTurnCount = next.length;
     cacheIndex = next;
     renderList(ui);
+  }
+
+  // 将📌插入到对应消息之后
+  function composeWithPins(baseList) {
+    try { if (!cpMap || !(cpMap instanceof Map)) loadCPSet(); } catch {}
+    const pins = [];
+    let needSave = false;
+    cpMap.forEach((meta, pinId) => {
+      if (!meta || typeof meta !== 'object') return;
+      const msgKey = meta.msgKey;
+      if (!msgKey) return;
+      let anchorId = meta.anchorId;
+      if (!anchorId || !document.getElementById(anchorId)) {
+        anchorId = resolvePinAnchor(meta);
+        if (anchorId) { meta.anchorId = anchorId; needSave = true; }
+      }
+      if (!anchorId) return; // 无法解析，跳过
+      try { const ae = document.getElementById(anchorId); if (ae) ae.setAttribute('data-pin-id', pinId); } catch {}
+      const created = meta.created || 0;
+      pins.push({ pinId, msgKey, anchorId, created });
+    });
+    if (needSave) saveCPSet();
+
+    // 按消息分组
+    const byMsg = new Map();
+    for (const p of pins) {
+      if (!byMsg.has(p.msgKey)) byMsg.set(p.msgKey, []);
+      byMsg.get(p.msgKey).push(p);
+    }
+
+    // 构建合成列表
+    const combined = [];
+    // 先预计算锚点y用于排序
+    const getY = (id) => {
+      const el = document.getElementById(id);
+      if (!el) return Infinity;
+      const r = el.getBoundingClientRect();
+      return r ? r.top : Infinity;
+    };
+
+    // 全局📌编号
+    let pinSeq = 0;
+    for (const item of baseList) {
+      combined.push(item);
+      const arr = byMsg.get(item.key);
+      if (!arr || !arr.length) continue;
+      arr.sort((a,b) => {
+        const ya = getY(a.anchorId), yb = getY(b.anchorId);
+        if (ya !== yb) return ya - yb;
+        return a.created - b.created;
+      });
+      for (const p of arr) {
+        pinSeq++;
+        combined.push({
+          id: p.anchorId,
+          key: p.pinId,
+          parentKey: item.key,
+          idx: item.idx, // 用父消息的 idx 保持相邻
+          role: 'pin',
+          preview: `📌${pinSeq}`,
+          seq: pinSeq
+        });
+      }
+    }
+    return combined;
+  }
+
+  function resolvePinAnchor(meta) {
+    try {
+      const { msgKey, frac, ctx } = meta;
+      const turn = findTurnByKey(msgKey);
+      if (!turn) return null;
+      const id = `cgpt-pin-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,6)}`;
+      const span = document.createElement('span');
+      span.id = id;
+      span.className = 'cgpt-pin-anchor';
+
+      // 1) 优先：按路径+偏移恢复
+      if (ctx && ctx.p != null) {
+        const el = resolveElementPath(turn, ctx.p);
+        if (el) {
+          const r = createCollapsedRangeAtElementOffset(el, ctx.o || 0);
+          try {
+            r.insertNode(span);
+            // 自愈：补齐旧数据缺失的 ctx/frac
+            if (!meta.ctx) meta.ctx = { p: ctx.p, o: ctx.o || 0 };
+            if (typeof meta.frac !== 'number') {
+              const measureEl = getTurnMeasureEl(turn);
+              const mrect = measureEl.getBoundingClientRect();
+              const sr = span.getBoundingClientRect();
+              const h = Math.max(1, mrect.height || 1);
+              meta.frac = h ? Math.max(0, Math.min(1, (sr.top - mrect.top) / h)) : 0.0;
+            }
+            return id;
+          } catch {}
+        }
+      }
+
+      // 2) 其次：按 frac 在内容容器内恢复
+      const measureEl = getTurnMeasureEl(turn);
+      const mrect = measureEl.getBoundingClientRect();
+      const f = Math.max(0, Math.min(1, typeof frac === 'number' ? frac : 0.0));
+      const targetY = mrect.top + f * Math.max(1, mrect.height);
+      const targetX = mrect.left + Math.max(4, mrect.width * 0.5);
+      const r2 = findNearestCharRange(measureEl, targetX, targetY) || findNearestCharRange(turn, targetX, targetY);
+      if (r2) {
+        try {
+          r2.insertNode(span);
+          // 自愈：为缺失信息的旧数据补齐 ctx/frac
+          meta.frac = f;
+          try { meta.ctx = extractRangeInfo(r2, turn) || meta.ctx || null; } catch {}
+          return id;
+        } catch {}
+      }
+
+      // 3) 最后兜底
+      const target = findNodeAtYWithin(turn, targetY) || findTurnAnchor(turn) || turn;
+      try {
+        target.parentNode?.insertBefore(span, target);
+        // 兜底也尽量记录一个 frac 值
+        try {
+          const sr = span.getBoundingClientRect();
+          const h = Math.max(1, mrect.height || 1);
+          meta.frac = h ? Math.max(0, Math.min(1, (sr.top - mrect.top) / h)) : (typeof meta.frac === 'number' ? meta.frac : 0.0);
+        } catch {}
+        return id;
+      } catch {}
+      try { turn.appendChild(span); return id; } catch {}
+    } catch {}
+    return null;
+  }
+
+  function findTurnByKey(key) {
+    const turns = qsTurns();
+    for (const t of turns) {
+      const k = t.getAttribute('data-message-id') || t.getAttribute('data-testid') || t.id;
+      if (k === key) return t;
+    }
+    return null;
+  }
+
+  function findNodeAtYWithin(root, y) {
+    const blocks = root.querySelectorAll('p,li,pre,code,blockquote,h1,h2,h3,h4,h5,h6, .markdown > *, .prose > *');
+    let best = null, bestDist = Infinity;
+    for (const el of blocks) {
+      if (!root.contains(el)) continue;
+      const r = el.getBoundingClientRect();
+      if (!r || r.height === 0) continue;
+      const cy = r.top + r.height / 2;
+      const d = Math.abs(cy - y);
+      if (d < bestDist) { bestDist = d; best = el; }
+    }
+    return best;
   }
 
   function getScrollRoot(start) {
@@ -663,6 +1168,7 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
 
   function findTurnAnchor(root) {
     if (!root) return null;
+    if (root.classList && root.classList.contains('cgpt-pin-anchor')) return root;
     const selectors = [
       '[data-message-author-role] .whitespace-pre-wrap',
       '[data-message-content-part]',
@@ -729,6 +1235,7 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
   function wirePanel(ui) {
     const toggleBtn = ui.nav.querySelector('.compact-toggle');
     const refreshBtn = ui.nav.querySelector('.compact-refresh');
+    const starBtn = ui.nav.querySelector('.compact-star');
 
     if (toggleBtn) {
       toggleBtn.addEventListener('click', () => {
@@ -783,6 +1290,18 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
       refreshBtn.title = "刷新对话列表 (Shift+点击 或 右键 = 强制重新扫描)";
     }
 
+    // 收藏过滤按钮
+    if (starBtn) {
+      starBtn.addEventListener('click', () => {
+        filterFav = !filterFav;
+        saveFavFilterState();
+        updateStarBtnState(ui);
+        renderList(ui);
+      });
+      updateStarBtnState(ui);
+    }
+
+
     // 底部按钮
     const prevBtn = ui.nav.querySelector('#cgpt-nav-prev');
     const nextBtn = ui.nav.querySelector('#cgpt-nav-next');
@@ -833,15 +1352,51 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
     }
   }
 
+  function updateStarBtnState(ui) {
+    try {
+      const starBtn = ui.nav.querySelector('.compact-star');
+      if (!starBtn) return;
+      const count = favSet ? favSet.size : 0;
+      starBtn.classList.toggle('active', !!filterFav);
+      starBtn.textContent = filterFav ? '★' : '☆';
+      starBtn.title = (filterFav ? '显示全部（当前仅收藏）' : '仅显示收藏') + (count ? `（${count}）` : '');
+    } catch {}
+  }
+
+  // 移除不存在于 validKeys 的收藏，返回移除数量
+  function runFavoritesGC(saveAfter = false, validKeys = null, onlyPins = false) {
+    try {
+      if (!favSet || !(favSet instanceof Set) || favSet.size === 0) return 0;
+      const valid = validKeys instanceof Set ? validKeys : new Set();
+      // 如果没提供 validKeys，就尽量构造一个
+      if (!(validKeys instanceof Set)) {
+        try { const base = buildIndex(); base.forEach(i => valid.add(i.key)); } catch {}
+        try { loadCPSet(); cpMap.forEach((_, pid) => valid.add(pid)); } catch {}
+      }
+      let removed = 0;
+      const now = Date.now();
+      for (const k of Array.from(favSet.values())) {
+        if (onlyPins && !(typeof k === 'string' && k.startsWith('pin-'))) continue;
+        const meta = favMeta.get(k) || { created: 0 };
+        if (!valid.has(k) || !meta.created || (now - meta.created) > FAV_TTL_MS) { favSet.delete(k); favMeta.delete(k); removed++; }
+      }
+      if (removed && saveAfter) saveFavSet();
+      return removed;
+    } catch { return 0; }
+  }
+
   // 改为不依赖缓存索引，单击立即滚动
   function jumpToEdge(which) {
-    const turns = qsTurns();
-    if (turns && turns.length) {
-      const el = which === 'top' ? turns[0] : turns[turns.length - 1];
-      if (!el.id) el.id = `cgpt-turn-edge-${which}`;
-      setActiveTurn(el.id);
-      scrollToTurn(el);
-      return;
+    const listNow = cacheIndex;
+    if (listNow && listNow.length) {
+      const targetItem = which === 'top' ? listNow[0] : listNow[listNow.length - 1];
+      const el = document.getElementById(targetItem.id) || qsTurns()[targetItem.idx] || null;
+      if (el) {
+        if (!el.id) el.id = `cgpt-turn-edge-${which}`;
+        setActiveTurn(el.id);
+        scrollToTurn(el);
+        return;
+      }
     }
     const sc = getScrollRoot(document.body);
     const isWindow = (sc === document.documentElement || sc === document.body || sc === (document.scrollingElement || document.documentElement));
@@ -933,6 +1488,289 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
     document.addEventListener('scroll', onAnyScroll, { passive: true, capture: true });
     window.addEventListener('resize', onAnyScroll, { passive: true });
     scheduleActiveUpdateNow();
+  }
+
+  // 绑定 Option+单击 添加📌
+  function bindAltPin(ui) {
+    if (window.__cgptPinBound) return;
+    const onClick = (e) => {
+      try {
+        if (!e.altKey || e.button !== 0) return;
+        const nt = e.target;
+        if (!nt) return;
+        if (nt.closest && nt.closest('#cgpt-compact-nav')) return; // 忽略在面板内
+        // 若点击在内容中的📌图标上，则删除该📌
+        const anc = nt.closest && nt.closest('.cgpt-pin-anchor');
+        if (anc) {
+          let pid = anc.getAttribute('data-pin-id') || '';
+          if (!pid) {
+            // 兼容：从 cpMap 反查
+            for (const [k, v] of Array.from(cpMap.entries())) {
+              if (v && v.anchorId === anc.id) { pid = k; break; }
+            }
+          }
+          if (pid && cpMap.has(pid)) {
+            cpMap.delete(pid);
+            try { anc.remove(); } catch {}
+            if (favSet.has(pid)) { favSet.delete(pid); favMeta.delete(pid); saveFavSet(); updateStarBtnState(ui); }
+            saveCPSet();
+            scheduleRefresh(ui);
+            e.preventDefault();
+            e.stopPropagation();
+            return;
+          }
+        }
+        e.preventDefault();
+        e.stopPropagation();
+        // 找到所属消息
+        const turn = findTurnFromNode(nt);
+        if (!turn) return;
+        const msgKey = turn.getAttribute('data-message-id') || turn.getAttribute('data-testid') || turn.id;
+        if (!msgKey) return;
+
+        // 在点击位置插入隐形锚点
+        const anchor = insertPinAnchorAtPoint(e.clientX, e.clientY, turn);
+        if (!anchor) return;
+
+        // 保存📌
+        const pinId = `pin-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,6)}`;
+        const meta = { msgKey, anchorId: anchor.id, frac: anchor.frac, created: Date.now(), ctx: anchor.ctx || null };
+        try { if (!cpMap || !(cpMap instanceof Map)) loadCPSet(); } catch {}
+        cpMap.set(pinId, meta);
+        try { const ae = document.getElementById(meta.anchorId); if (ae) ae.setAttribute('data-pin-id', pinId); } catch {}
+        saveCPSet();
+        runCheckpointGC(true);
+        scheduleRefresh(ui);
+      } catch (err) {
+        if (DEBUG || window.DEBUG_TEMP) console.error('添加📌失败:', err);
+      }
+    };
+    document.addEventListener('click', onClick, true);
+    window.__cgptPinBound = true;
+  }
+
+  function findTurnFromNode(node) {
+    if (!node || node.nodeType !== 1) node = node?.parentElement || null;
+    if (!node) return null;
+    let el = node.closest('[data-cgpt-turn="1"]');
+    if (el) return el;
+    // 兜底：尝试已知选择器
+    el = node.closest('article[data-testid^="conversation-turn-"],[data-testid^="conversation-turn-"],div[data-message-id],div[class*="group"][data-testid]');
+    return el;
+  }
+
+  function caretRangeFromPoint(x, y) {
+    if (document.caretRangeFromPoint) return document.caretRangeFromPoint(x, y);
+    const pos = document.caretPositionFromPoint ? document.caretPositionFromPoint(x, y) : null;
+    if (!pos) return null;
+    const r = document.createRange();
+    try { r.setStart(pos.offsetNode, pos.offset); } catch { return null; }
+    r.collapse(true);
+    return r;
+  }
+
+  function getElementsFromPoint(x, y) {
+    const arr = (document.elementsFromPoint ? document.elementsFromPoint(x, y) : []);
+    return Array.isArray(arr) ? arr : [];
+  }
+
+  function deepestDescendantAtPointWithin(turnEl, x, y) {
+    const stack = getElementsFromPoint(x, y);
+    for (const el of stack) {
+      if (!el || el.id === 'cgpt-compact-nav') continue;
+      if (turnEl.contains(el)) return el;
+    }
+    return null;
+  }
+
+  function findNearestCharRange(container, x, y) {
+    try {
+      const tw = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, {
+        acceptNode: node => {
+          if (!node || !node.nodeValue) return NodeFilter.FILTER_REJECT;
+          if (!node.nodeValue.trim()) return NodeFilter.FILTER_SKIP;
+          return NodeFilter.FILTER_ACCEPT;
+        }
+      });
+
+      let best = null; // {node, offset, dist}
+      let nodesChecked = 0;
+      const maxNodes = 200;
+
+      while (tw.nextNode() && nodesChecked < maxNodes) {
+        const node = tw.currentNode;
+        nodesChecked++;
+        const len = node.nodeValue.length;
+        if (!len) continue;
+        const step = Math.max(1, Math.ceil(len / 64)); // 粗取样
+        const range = document.createRange();
+        for (let i = 0; i < len; i += step) {
+          range.setStart(node, i);
+          range.setEnd(node, Math.min(len, i + 1));
+          const r = range.getBoundingClientRect();
+          if (!r || !isFinite(r.top) || r.width === 0 && r.height === 0) continue;
+          const cx = Math.max(r.left, Math.min(x, r.right));
+          const cy = Math.max(r.top, Math.min(y, r.bottom));
+          const dx = cx - x, dy = cy - y;
+          const dist = dx * dx + dy * dy;
+          if (!best || dist < best.dist) best = { node, offset: i, dist };
+        }
+        // 精细化：在最佳附近逐字符搜索
+        if (best && best.node === node) {
+          const i0 = Math.max(0, best.offset - step * 2);
+          const i1 = Math.min(len, best.offset + step * 2);
+          for (let i = i0; i < i1; i++) {
+            range.setStart(node, i);
+            range.setEnd(node, Math.min(len, i + 1));
+            const r = range.getBoundingClientRect();
+            if (!r || (!r.width && !r.height)) continue;
+            const cx = Math.max(r.left, Math.min(x, r.right));
+            const cy = Math.max(r.top, Math.min(y, r.bottom));
+            const dx = cx - x, dy = cy - y;
+            const dist = dx * dx + dy * dy;
+            if (dist < best.dist) best = { node, offset: i, dist };
+          }
+        }
+      }
+
+      if (best) {
+        const res = document.createRange();
+        res.setStart(best.node, best.offset);
+        res.collapse(true);
+        return res;
+      }
+    } catch {}
+    return null;
+  }
+
+  function insertPinAnchorAtPoint(x, y, turnEl) {
+    const range = caretRangeFromPoint(x, y);
+    const id = `cgpt-pin-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,6)}`;
+    const span = document.createElement('span');
+    span.id = id;
+    span.className = 'cgpt-pin-anchor';
+    let frac = 0.0;
+    const measureEl = getTurnMeasureEl(turnEl);
+    const rect = measureEl.getBoundingClientRect();
+    if (rect && rect.height > 0) {
+      frac = Math.max(0, Math.min(1, (y - rect.top) / rect.height));
+    }
+    let usedRange = null;
+    try {
+      if (range && turnEl.contains(range.startContainer)) {
+        usedRange = range;
+      }
+    } catch {}
+    // 改进：在点击点下的最深元素中寻找最近字符
+    const deep = deepestDescendantAtPointWithin(turnEl, x, y) || turnEl;
+    const r2 = usedRange ? null : (findNearestCharRange(deep, x, y) || findNearestCharRange(turnEl, x, y));
+    if (r2) usedRange = r2;
+    if (usedRange) {
+      try {
+        const info = extractRangeInfo(usedRange, turnEl);
+        usedRange.insertNode(span);
+        return { id, frac, ctx: info };
+      } catch {}
+    }
+    // 退化：插入到消息内容靠前位置
+    const anchorTarget = findTurnAnchor(turnEl) || turnEl;
+    try { anchorTarget.parentNode?.insertBefore(span, anchorTarget); return { id, frac, ctx: null }; } catch {}
+    try { turnEl.appendChild(span); return { id, frac, ctx: null }; } catch {}
+    return null;
+  }
+
+  function getTurnMeasureEl(turnEl) {
+    const sels = [
+      '[data-message-author-role] .markdown',
+      '[data-message-author-role] .prose',
+      '.deep-research-result .markdown',
+      '.border-token-border-sharp .markdown',
+      '.text-message',
+      'article .markdown',
+      '.prose',
+      '[data-message-content-part]'
+    ];
+    let best = null, bestH = 0;
+    for (const s of sels) {
+      const list = turnEl.querySelectorAll(s);
+      for (const el of list) {
+        const h = el.getBoundingClientRect().height;
+        if (h > bestH) { bestH = h; best = el; }
+      }
+    }
+    return best || turnEl;
+  }
+
+  function extractRangeInfo(range, turnEl) {
+    try {
+      const start = range.startContainer;
+      const parentEl = (start.nodeType === 3 ? start.parentElement : start.closest('*'));
+      if (!parentEl || !turnEl.contains(parentEl)) return null;
+      const path = buildElementPath(turnEl, parentEl);
+      const offset = computeElementTextOffset(parentEl, range.startContainer, range.startOffset);
+      return { p: path, o: offset };
+    } catch { return null; }
+  }
+
+  function buildElementPath(base, el) {
+    const parts = [];
+    let cur = el;
+    while (cur && cur !== base) {
+      const parent = cur.parentElement;
+      if (!parent) break;
+      let idx = 0, sib = cur;
+      while ((sib = sib.previousElementSibling)) idx++;
+      parts.push(idx);
+      cur = parent;
+    }
+    parts.push(0); // base marker (not used)
+    return parts.reverse().join('/');
+  }
+
+  function resolveElementPath(base, pathStr) {
+    try {
+      if (!pathStr) return null;
+      const parts = pathStr.split('/').map(n => parseInt(n, 10));
+      let cur = base;
+      for (let i = 1; i < parts.length; i++) { // skip base marker
+        const idx = parts[i];
+        cur = cur && cur.children ? cur.children[idx] : null;
+        if (!cur) return null;
+      }
+      return cur;
+    } catch { return null; }
+  }
+
+  function computeElementTextOffset(el, node, off) {
+    // compute char offset within element text by summing text node lengths before target node
+    let total = 0;
+    const tw = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null);
+    while (tw.nextNode()) {
+      const n = tw.currentNode;
+      if (n === node) { total += Math.max(0, Math.min(off, n.nodeValue ? n.nodeValue.length : 0)); break; }
+      total += n.nodeValue ? n.nodeValue.length : 0;
+    }
+    return total;
+  }
+
+  function createCollapsedRangeAtElementOffset(el, ofs) {
+    const r = document.createRange();
+    const tw = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null);
+    let remain = Math.max(0, ofs);
+    while (tw.nextNode()) {
+      const n = tw.currentNode;
+      const len = n.nodeValue ? n.nodeValue.length : 0;
+      if (remain <= len) {
+        r.setStart(n, remain);
+        r.collapse(true);
+        return r;
+      }
+      remain -= len;
+    }
+    // fallback: place at end of element
+    r.selectNodeContents(el);
+    r.collapse(false);
+    return r;
   }
 
   function startBurstRefresh(ui, ms = 6000, step = 160) {
@@ -1051,15 +1889,16 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
   }
 
   function jumpActiveBy(delta) {
-    if (!cacheIndex.length) return;
-    let idx = cacheIndex.findIndex(x => x.id === currentActiveId);
+    const listNow = cacheIndex;
+    if (!listNow.length) return;
+    let idx = listNow.findIndex(x => x.id === currentActiveId);
     if (idx < 0) {
       updateActiveFromAnchor();
-      idx = cacheIndex.findIndex(x => x.id === currentActiveId);
+      idx = listNow.findIndex(x => x.id === currentActiveId);
       if (idx < 0) idx = 0;
     }
-    const nextIdx = Math.max(0, Math.min(cacheIndex.length - 1, idx + delta));
-    const id = cacheIndex[nextIdx].id;
+    const nextIdx = Math.max(0, Math.min(listNow.length - 1, idx + delta));
+    const id = listNow[nextIdx].id;
     const el = document.getElementById(id);
     if (el) { setActiveTurn(id); scrollToTurn(el); }
   }
