@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         ChatGPT 对话导航
 // @namespace    http://tampermonkey.net/
-// @version      4.0
-// @description  紧凑导航 + 实时定位；修复边界误判；底部纯箭头按钮；回到顶部/到底部单击即用；禁用面板内双击选中；快捷键 Cmd+↑/↓（Mac）或 Alt+↑/↓（Windows）；修复竞态条件和流式输出检测问题；感谢loongphy佬适配暗色模式（3.0），加入标记点📌功能和收藏夹功能（4.0大更新）
-// @author       schweigen, loongphy(在3.0版本帮忙加入暗色模式)
+// @version      4.1
+// @description  紧凑导航 + 实时定位；修复边界误判；底部纯箭头按钮；回到顶部/到底部单击即用；禁用面板内双击选中；快捷键 Cmd+↑/↓（Mac）或 Alt+↑/↓（Windows）；修复竞态条件和流式输出检测问题；加入标记点📌功能和收藏夹功能（4.0大更新）。感谢loongphy佬适配暗色模式（3.0）+适配左右侧边栏自动跟随（4.1）
+// @author       schweigen, loongphy(在3.0版本帮忙加入暗色模式，在4.1版本中帮忙适配左右侧边栏自动跟随)
 // @license      MIT
 // @match        https://chatgpt.com/*
 // @match        https://chatgpt.com/?model=*
@@ -24,6 +24,7 @@
 
   const CONFIG = { maxPreviewLength: 12, animation: 250, refreshInterval: 2000, forceRefreshInterval: 10000, anchorOffset: 8 };
   const BOUNDARY_EPS = 28;
+  const DEFAULT_FOLLOW_MARGIN = Math.max(CONFIG.anchorOffset || 8, 12);
   const DEBUG = false;
   // 存储键与检查点状态
   const STORE_NS = 'cgpt-quicknav';
@@ -121,6 +122,9 @@
       nav.style.right = '10px';
       nav.style.left = 'auto';
       nav.style.bottom = 'auto';
+      if (nav._ui && nav._ui.layout && typeof nav._ui.layout.notifyExternalPositionChange === 'function') {
+        try { nav._ui.layout.notifyExternalPositionChange(); } catch {}
+      }
       const originalBg = nav.style.background;
       const originalOutline = nav.style.outline;
       nav.style.background = 'var(--cgpt-nav-accent-subtle)';
@@ -272,6 +276,9 @@
             } catch (e) {
               if (DEBUG || window.DEBUG_TEMP) console.log('ChatGPT Navigation: 断开MutationObserver失败', e);
             }
+          }
+          if (oldNav._ui.layout && typeof oldNav._ui.layout.destroy === 'function') {
+            try { oldNav._ui.layout.destroy(); } catch {}
           }
         }
         oldNav.remove();
@@ -522,9 +529,14 @@ body[data-theme='dark'] #cgpt-compact-nav { color-scheme: dark; }
 html[data-theme='light'] #cgpt-compact-nav,
 body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
 
-#cgpt-compact-nav { position: fixed; top: 60px; right: 10px; width: var(--cgpt-nav-width, auto); min-width: 80px; max-width: var(--cgpt-nav-width, 210px); z-index: 2147483647 !important; font-family: var(--cgpt-nav-font); font-size: 13px; pointer-events: auto; background: transparent; -webkit-user-select:none; user-select:none; -webkit-tap-highlight-color: transparent; color: var(--cgpt-nav-text-strong); color-scheme: light dark; }
-#cgpt-compact-nav * { -webkit-user-select:none; user-select:none; }
-.compact-header { display:flex; align-items:center; justify-content:space-between; padding:4px 8px; margin-bottom:4px; background:var(--cgpt-nav-panel-bg); border-radius:var(--cgpt-nav-radius-lg); border:1px solid var(--cgpt-nav-panel-border); pointer-events:auto; cursor:move; box-shadow:var(--cgpt-nav-panel-shadow); min-width:100px; backdrop-filter:saturate(180%) blur(18px); }
+#cgpt-compact-nav { position: fixed; top: 60px; right: 10px; width: var(--cgpt-nav-width, auto); min-width: 80px; max-width: var(--cgpt-nav-width, 210px); z-index: 2147483647 !important; font-family: var(--cgpt-nav-font); font-size: 13px; pointer-events: auto; background: transparent; -webkit-user-select:none; user-select:none; -webkit-tap-highlight-color: transparent; color: var(--cgpt-nav-text-strong); color-scheme: light dark; display:flex; flex-direction:column; align-items:stretch; box-sizing:border-box; --cgpt-nav-gutter: 0px; }
+#cgpt-compact-nav.cgpt-has-scrollbar { --cgpt-nav-gutter: clamp(4px, calc(var(--cgpt-nav-width, 210px) / 32), 8px); }
+#cgpt-compact-nav * { -webkit-user-select:none; user-select:none; box-sizing:border-box; }
+#cgpt-compact-nav > .compact-header,
+#cgpt-compact-nav > .compact-list,
+#cgpt-compact-nav > .compact-footer { width:100%; }
+.compact-header { display:flex; align-items:center; justify-content:space-between; padding:4px 8px; margin-bottom:4px; background:var(--cgpt-nav-panel-bg); border-radius:var(--cgpt-nav-radius-lg); border:1px solid var(--cgpt-nav-panel-border); pointer-events:auto; cursor:move; box-shadow:var(--cgpt-nav-panel-shadow); min-width:100px; backdrop-filter:saturate(180%) blur(18px); width:100%; padding-inline-end: calc(8px + var(--cgpt-nav-gutter)); }
+.compact-actions { display:flex; align-items:center; gap:4px; width:100%; }
 .compact-title { font-size:11px; font-weight:600; color:var(--cgpt-nav-text-muted); display:flex; align-items:center; gap:3px; text-transform:uppercase; letter-spacing:.04em; }
 .compact-title span { color:var(--cgpt-nav-text-strong); }
 .compact-title svg { width:12px; height:12px; opacity:.55; }
@@ -534,11 +546,11 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
 .compact-toggle:hover, .compact-refresh:hover { border-color:var(--cgpt-nav-accent-subtle); color:var(--cgpt-nav-accent); box-shadow:0 4px 14px rgba(147,51,234,0.12); background:var(--cgpt-nav-item-hover-bg); }
 .compact-toggle:active, .compact-refresh:active { transform:scale(.94); }
 .toggle-text { display:block; font-family:monospace; font-size:clamp(12px, calc(var(--cgpt-nav-width, 210px) / 14), 16px); }
-  .compact-list { max-height:400px; overflow-y:auto; overflow-x:hidden; padding:0; pointer-events:auto; display:flex; flex-direction:column; gap:8px; scrollbar-width:thin; scrollbar-color:var(--cgpt-nav-scrollbar-thumb) transparent; }
+  .compact-list { max-height:400px; overflow-y:auto; overflow-x:hidden; padding:0; pointer-events:auto; display:flex; flex-direction:column; gap:8px; scrollbar-width:thin; scrollbar-color:var(--cgpt-nav-scrollbar-thumb) transparent; width:100%; padding-right: var(--cgpt-nav-gutter); scrollbar-gutter: stable both-edges; }
 .compact-list::-webkit-scrollbar { width:3px; }
 .compact-list::-webkit-scrollbar-thumb { background:var(--cgpt-nav-scrollbar-thumb); border-radius:2px; }
 .compact-list::-webkit-scrollbar-thumb:hover { background:var(--cgpt-nav-scrollbar-thumb-hover); }
-.compact-item { display:block; padding:3px 8px; margin:0; border-radius:var(--cgpt-nav-radius); cursor:pointer; transition:all .16s ease; font-size:12px; line-height:1.4; min-height:20px; white-space:nowrap; overflow:hidden; /* 省略号交给 .compact-text */ pointer-events:auto; background:var(--cgpt-nav-item-bg); box-shadow:var(--cgpt-nav-item-shadow); width:auto; min-width:60px; max-width: calc(var(--cgpt-nav-width, 210px) - 20px); color:var(--cgpt-nav-text-strong); border:1px solid transparent; position:relative; padding-right:26px; }
+.compact-item { display:block; padding:3px 8px; margin:0; border-radius:var(--cgpt-nav-radius); cursor:pointer; transition:all .16s ease; font-size:12px; line-height:1.4; min-height:20px; white-space:nowrap; overflow:hidden; /* 省略号交给 .compact-text */ pointer-events:auto; background:var(--cgpt-nav-item-bg); box-shadow:var(--cgpt-nav-item-shadow); width:100%; min-width:0; color:var(--cgpt-nav-text-strong); border:1px solid transparent; position:relative; padding-right: calc(26px + var(--cgpt-nav-gutter)); }
 .compact-item:hover { background:var(--cgpt-nav-item-hover-bg); transform:translateX(2px); box-shadow:0 6px 16px rgba(15,23,42,0.12); }
 .compact-item.user { color:var(--cgpt-nav-positive); border-color:var(--cgpt-nav-positive); border-color:color-mix(in srgb, var(--cgpt-nav-positive) 45%, transparent); }
 .compact-item.assistant { color:var(--cgpt-nav-info); border-color:var(--cgpt-nav-info); border-color:color-mix(in srgb, var(--cgpt-nav-info) 45%, transparent); }
@@ -553,7 +565,7 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
   .compact-star { background:var(--cgpt-nav-item-bg); border:1px solid var(--cgpt-nav-border-muted); color:var(--cgpt-nav-text-strong); cursor:pointer; width:clamp(20px, calc(var(--cgpt-nav-width, 210px) / 10), 26px); height:clamp(20px, calc(var(--cgpt-nav-width, 210px) / 10), 26px); display:flex; align-items:center; justify-content:center; border-radius:var(--cgpt-nav-radius); transition:all .2s ease; font-weight:600; line-height:1; box-shadow:var(--cgpt-nav-item-shadow); backdrop-filter:saturate(180%) blur(18px); font-size:clamp(12px, calc(var(--cgpt-nav-width, 210px) / 14), 16px); margin-left:4px; }
   .compact-star:hover { border-color:var(--cgpt-nav-accent-subtle); color:var(--cgpt-nav-accent); box-shadow:0 4px 14px rgba(147,51,234,0.12); background:var(--cgpt-nav-item-hover-bg); }
   .compact-star.active { background:var(--cgpt-nav-accent-subtle); color:var(--cgpt-nav-accent); border-color:var(--cgpt-nav-accent-subtle); }
-  .fav-toggle { position:absolute; right:6px; top:2px; border:none; background:transparent; color:var(--cgpt-nav-text-muted); cursor:pointer; font-size:12px; line-height:1; padding:2px; opacity:.7; }
+  .fav-toggle { position:absolute; right:calc(6px + var(--cgpt-nav-gutter)); top:2px; border:none; background:transparent; color:var(--cgpt-nav-text-muted); cursor:pointer; font-size:12px; line-height:1; padding:2px; opacity:.7; }
   .fav-toggle:hover { color:var(--cgpt-nav-accent); opacity:1; }
   .fav-toggle.active { color:var(--cgpt-nav-accent); opacity:1; }
 /* 锚点占位 */
@@ -563,11 +575,13 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
 
 /* 调整宽度手柄 */
 .cgpt-resize-handle { position:absolute; left:-5px; top:0; bottom:0; width:8px; cursor:ew-resize; background:transparent; }
-.cgpt-resize-handle::after { content:''; position:absolute; left:2px; top:25%; bottom:25%; width:2px; background: var(--cgpt-nav-border-muted); border-radius:1px; opacity:.6; }
+.cgpt-resize-handle::after { content:''; position:absolute; left:2px; top:25%; bottom:25%; width:2px; background: var(--cgpt-nav-border-muted); border-radius:1px; opacity:0; transition:opacity .2s ease; }
+.cgpt-resize-handle:hover::after,
+#cgpt-compact-nav.cgpt-resizing .cgpt-resize-handle::after { opacity:.6; }
 
 /* 底部导航条 */
-.compact-footer { margin-top:6px; display:flex; gap:clamp(3px, calc(var(--cgpt-nav-width, 210px) / 70), 6px); }
-.nav-btn { flex:1 1 auto; padding: clamp(4px, calc(var(--cgpt-nav-width, 210px) / 56), 6px) clamp(6px, calc(var(--cgpt-nav-width, 210px) / 35), 8px); font-size: clamp(12px, calc(var(--cgpt-nav-width, 210px) / 14), 14px); border-radius:var(--cgpt-nav-radius-lg); border:1px solid var(--cgpt-nav-border-muted); background:var(--cgpt-nav-footer-bg); cursor:pointer; box-shadow:var(--cgpt-nav-item-shadow); line-height:1; color:var(--cgpt-nav-text-strong); transition:all .18s ease; backdrop-filter:saturate(180%) blur(18px); }
+.compact-footer { margin-top:6px; display:flex; gap:clamp(3px, calc(var(--cgpt-nav-width, 210px) / 70), 6px); width:100%; padding-right: var(--cgpt-nav-gutter); }
+.nav-btn { flex:1 1 25%; min-width:0; padding: clamp(4px, calc(var(--cgpt-nav-width, 210px) / 56), 6px) clamp(6px, calc(var(--cgpt-nav-width, 210px) / 35), 8px); font-size: clamp(12px, calc(var(--cgpt-nav-width, 210px) / 14), 14px); border-radius:var(--cgpt-nav-radius-lg); border:1px solid var(--cgpt-nav-border-muted); background:var(--cgpt-nav-footer-bg); cursor:pointer; box-shadow:var(--cgpt-nav-item-shadow); line-height:1; color:var(--cgpt-nav-text-strong); transition:all .18s ease; backdrop-filter:saturate(180%) blur(18px); }
 .nav-btn:hover { background:var(--cgpt-nav-footer-hover); transform:translateY(-1px); }
 .nav-btn:active { transform: translateY(1px); }
 
@@ -638,7 +652,7 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
     nav.id = 'cgpt-compact-nav';
     nav.innerHTML = `
       <div class="compact-header">
-        <div style="display: flex; align-items: center; gap: 4px;">
+        <div class="compact-actions">
           <button class="compact-toggle" type="button" title="收起/展开"><span class="toggle-text">−</span></button>
           <button class="compact-refresh" type="button" title="刷新对话列表">⟳</button>
           <button class="compact-star" type="button" title="仅显示收藏">☆</button>
@@ -653,8 +667,24 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
       </div>
     `;
     document.body.appendChild(nav);
-    enableDrag(nav);
-    enableResize(nav);
+    let layout = {
+      beginUserInteraction: () => {},
+      endUserInteraction: () => {},
+      notifyExternalPositionChange: () => {},
+      scheduleEvaluation: () => {},
+      captureManualPositions: () => {},
+      destroy: () => {}
+    };
+    try {
+      layout = createLayoutManager(nav) || layout;
+    } catch (err) {
+      if (DEBUG || window.DEBUG_TEMP) console.error('ChatGPT Navigation: 布局管理器初始化失败', err);
+    }
+    enableDrag(nav, {
+      onDragStart: () => { try { layout.beginUserInteraction(); } catch {} },
+      onDragEnd: () => { try { layout.endUserInteraction(); } catch {} }
+    });
+    enableResize(nav, layout);
     enableResponsiveClasses(nav);
     initCheckpoints(nav);
     applySavedWidth(nav);
@@ -664,8 +694,379 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
     nav.addEventListener('selectstart', (e) => { e.preventDefault(); }, { capture: true });
     nav.addEventListener('mousedown', (e) => { if (e.detail > 1) { e.preventDefault(); } }, { capture: true });
 
-    nav._ui = { nav };
-    return { nav };
+    const ui = { nav, layout };
+    nav._ui = ui;
+    return ui;
+  }
+
+  function createLayoutManager(nav) {
+    const state = {
+      nav,
+      destroyed: false,
+      userAdjusting: false,
+      followLeft: false,
+      followRight: false,
+      leftMargin: DEFAULT_FOLLOW_MARGIN,
+      rightMargin: DEFAULT_FOLLOW_MARGIN,
+      manual: { top: 0, left: null, right: null },
+      leftEl: null,
+      rightEl: null,
+      leftObserver: null,
+      rightObserver: null,
+      mutationObserver: null,
+      resizeHandler: null,
+      pendingEval: false,
+      rafId: 0,
+      rightRecheckTimer: 0,
+      rightRecheckAttempts: 0,
+      rightSavedPosition: null,
+      rightFollowLoopId: 0
+    };
+
+    function captureManualPositions() {
+      try {
+        const rect = nav.getBoundingClientRect();
+        const comp = window.getComputedStyle(nav);
+        const topPx = parseFloat(comp.top);
+        const leftPx = comp.left && comp.left !== 'auto' ? parseFloat(comp.left) : null;
+        const rightPx = comp.right && comp.right !== 'auto' ? parseFloat(comp.right) : null;
+        state.manual = {
+          top: Number.isFinite(topPx) ? topPx : rect.top,
+          left: Number.isFinite(leftPx) ? leftPx : null,
+          right: Number.isFinite(rightPx) ? rightPx : null
+        };
+      } catch {
+        state.manual = { top: 60, left: null, right: 10 };
+      }
+    }
+    captureManualPositions();
+
+    function cancelPending() {
+      if (state.rafId) {
+        cancelAnimationFrame(state.rafId);
+        state.rafId = 0;
+      }
+      state.pendingEval = false;
+    }
+
+    function scheduleEvaluation(reason) {
+      if (state.destroyed || state.userAdjusting) return;
+      if (state.pendingEval) return;
+      state.pendingEval = true;
+      state.rafId = requestAnimationFrame(() => {
+        state.rafId = 0;
+        state.pendingEval = false;
+        try { evaluateNow(reason); } catch (err) { if (DEBUG || window.DEBUG_TEMP) console.error('ChatGPT Navigation layout evaluate error:', err); }
+      });
+    }
+
+    function clearRightRecheck() {
+      if (state.rightRecheckTimer) {
+        clearTimeout(state.rightRecheckTimer);
+        state.rightRecheckTimer = 0;
+      }
+      state.rightRecheckAttempts = 0;
+    }
+
+    function releaseRightFollow() {
+      const saved = state.rightSavedPosition || state.manual || null;
+      state.followRight = false;
+      state.rightSavedPosition = null;
+      stopRightFollowLoop();
+      if (saved && Number.isFinite(saved.top)) {
+        nav.style.top = `${Math.round(saved.top)}px`;
+      }
+      if (saved) {
+        if (Number.isFinite(saved.right)) {
+          nav.style.right = `${Math.round(saved.right)}px`;
+          nav.style.left = 'auto';
+        } else if (Number.isFinite(saved.left)) {
+          nav.style.left = `${Math.round(saved.left)}px`;
+          nav.style.right = 'auto';
+        } else {
+          nav.style.right = `${DEFAULT_FOLLOW_MARGIN}px`;
+          nav.style.left = 'auto';
+        }
+      } else {
+        nav.style.right = `${DEFAULT_FOLLOW_MARGIN}px`;
+        nav.style.left = 'auto';
+      }
+      captureManualPositions();
+    }
+
+    function requestRightRecheck() {
+      if (state.rightRecheckTimer) return;
+      const attempts = Number.isFinite(state.rightRecheckAttempts) ? state.rightRecheckAttempts : 0;
+      const clamped = attempts > 8 ? 8 : attempts;
+      const delay = 180 + clamped * 70;
+      state.rightRecheckAttempts = attempts + 1;
+      state.rightRecheckTimer = window.setTimeout(() => {
+        state.rightRecheckTimer = 0;
+        scheduleEvaluation('right-recheck');
+      }, delay);
+    }
+
+    function stopRightFollowLoop() {
+      if (state.rightFollowLoopId) {
+        cancelAnimationFrame(state.rightFollowLoopId);
+        state.rightFollowLoopId = 0;
+      }
+    }
+
+    function ensureRightFollowLoop() {
+      if (state.rightFollowLoopId) return;
+      state.rightFollowLoopId = requestAnimationFrame(() => {
+        state.rightFollowLoopId = 0;
+        scheduleEvaluation('right-loop');
+      });
+    }
+
+    function beginUserInteraction() {
+      if (state.destroyed) return;
+      state.userAdjusting = true;
+      state.followLeft = false;
+      state.followRight = false;
+      state.rightSavedPosition = null;
+      stopRightFollowLoop();
+      cancelPending();
+    }
+
+    function endUserInteraction() {
+      if (state.destroyed) return;
+      state.userAdjusting = false;
+      captureManualPositions();
+      scheduleEvaluation('user-adjust');
+    }
+
+    function notifyExternalPositionChange() {
+      if (state.destroyed) return;
+      state.followLeft = false;
+      state.followRight = false;
+      state.rightSavedPosition = null;
+      stopRightFollowLoop();
+      captureManualPositions();
+      scheduleEvaluation('external-position');
+    }
+
+    function updateObservedElements() {
+      const leftEl = findLeftSidebarElement();
+      if (leftEl !== state.leftEl) {
+        if (state.leftObserver) {
+          try { state.leftObserver.disconnect(); } catch {}
+          state.leftObserver = null;
+        }
+        state.leftEl = leftEl;
+        if (leftEl && window.ResizeObserver) {
+          try {
+            const ro = new ResizeObserver(() => scheduleEvaluation('left-resize'));
+            ro.observe(leftEl);
+            state.leftObserver = ro;
+          } catch {}
+        }
+      }
+
+      const rightEl = findRightPanelElement();
+      if (rightEl !== state.rightEl) {
+        if (state.rightObserver) {
+          try { state.rightObserver.disconnect(); } catch {}
+          state.rightObserver = null;
+        }
+        state.rightEl = rightEl;
+        if (rightEl && window.ResizeObserver) {
+          try {
+            const ro = new ResizeObserver(() => scheduleEvaluation('right-resize'));
+            ro.observe(rightEl);
+            state.rightObserver = ro;
+          } catch {}
+        }
+        if (rightEl) {
+          state.rightRecheckAttempts = 0;
+          requestRightRecheck();
+        } else {
+          clearRightRecheck();
+        }
+      }
+    }
+
+    function evaluateNow(reason) {
+      if (state.destroyed || state.userAdjusting) return;
+      updateObservedElements();
+
+      const navRect = nav.getBoundingClientRect();
+      try {
+        const panel = state.rightEl ? getVisibleRect(state.rightEl, 0) : null;
+        if (nav && nav.dataset) {
+          nav.dataset.cgptLayout = JSON.stringify({
+            t: Date.now(),
+            reason,
+            followRight: !!state.followRight,
+            navRight: navRect ? navRect.right : null,
+            panelLeft: panel ? panel.left : null
+          });
+        }
+      } catch {}
+      if (!navRect || !Number.isFinite(navRect.left) || navRect.width <= 0) return;
+
+      const leftRect = state.leftEl ? getVisibleRect(state.leftEl, 0.5) : null;
+      if (!state.followLeft && leftRect && overlapsLeft(navRect, leftRect)) {
+        const gap = navRect.left - leftRect.right;
+        state.leftMargin = Number.isFinite(gap) && gap > DEFAULT_FOLLOW_MARGIN ? gap : DEFAULT_FOLLOW_MARGIN;
+        state.followLeft = true;
+      }
+
+      if (state.followLeft) {
+        applyLeftFollow(leftRect, navRect);
+        if (state.followRight) state.followRight = false;
+        return;
+      }
+
+      const rightRect = state.rightEl ? getVisibleRect(state.rightEl, 0.5) : null;
+      if (!state.rightEl) {
+        if (state.followRight) releaseRightFollow();
+        clearRightRecheck();
+      } else if (!rightRect) {
+        if (state.followRight) releaseRightFollow();
+        requestRightRecheck();
+      } else {
+        clearRightRecheck();
+      }
+      if (!state.followRight && rightRect && overlapsRight(navRect, rightRect)) {
+        if (!state.rightSavedPosition) {
+          const manual = state.manual || {};
+          state.rightSavedPosition = {
+            top: Number.isFinite(manual.top) ? manual.top : navRect.top,
+            left: Number.isFinite(manual.left) ? manual.left : null,
+            right: Number.isFinite(manual.right) ? manual.right : null
+          };
+        }
+        const gap = rightRect.left - navRect.right;
+        state.rightMargin = Number.isFinite(gap) && gap > DEFAULT_FOLLOW_MARGIN ? gap : DEFAULT_FOLLOW_MARGIN;
+        state.followRight = true;
+      }
+
+      if (state.followRight) {
+        if (!state.rightEl || !rightRect) {
+          releaseRightFollow();
+        } else {
+          applyRightFollow(rightRect, navRect);
+        }
+      }
+
+      if (state.followRight) ensureRightFollowLoop();
+      else stopRightFollowLoop();
+    }
+
+    function applyLeftFollow(panelRect, cachedNavRect) {
+      const rect = cachedNavRect || nav.getBoundingClientRect();
+      const navWidth = rect.width || nav.offsetWidth || 210;
+      const margin = Number.isFinite(state.leftMargin) ? state.leftMargin : DEFAULT_FOLLOW_MARGIN;
+      let targetLeft = margin;
+      if (panelRect) targetLeft = panelRect.right + margin;
+      const maxLeft = Math.max(0, window.innerWidth - navWidth - DEFAULT_FOLLOW_MARGIN);
+      if (targetLeft > maxLeft) targetLeft = maxLeft;
+      if (targetLeft < 0) targetLeft = 0;
+      const currentLeft = parseFloat(nav.style.left || '');
+      if (!Number.isFinite(currentLeft) || Math.abs(currentLeft - targetLeft) > 0.5) {
+        nav.style.left = `${Math.round(targetLeft)}px`;
+      }
+      nav.style.right = 'auto';
+      captureManualPositions();
+    }
+
+    function applyRightFollow(panelRect, cachedNavRect) {
+      const rect = cachedNavRect || nav.getBoundingClientRect();
+      const navWidth = rect.width || nav.offsetWidth || 210;
+      const margin = Number.isFinite(state.rightMargin) ? state.rightMargin : DEFAULT_FOLLOW_MARGIN;
+      let targetRight = margin;
+      if (panelRect) {
+        const panelWidth = window.innerWidth - panelRect.left;
+        targetRight = panelWidth + margin;
+      }
+      const maxRight = Math.max(DEFAULT_FOLLOW_MARGIN, window.innerWidth - navWidth);
+      if (targetRight > maxRight) targetRight = maxRight;
+      if (targetRight < DEFAULT_FOLLOW_MARGIN) targetRight = DEFAULT_FOLLOW_MARGIN;
+      const currentRight = parseFloat(nav.style.right || '');
+      if (!Number.isFinite(currentRight) || Math.abs(currentRight - targetRight) > 0.5) {
+        nav.style.right = `${Math.round(targetRight)}px`;
+      }
+      nav.style.left = 'auto';
+      captureManualPositions();
+    }
+
+    function destroy() {
+      state.destroyed = true;
+      cancelPending();
+      if (state.leftObserver) { try { state.leftObserver.disconnect(); } catch {} }
+      if (state.rightObserver) { try { state.rightObserver.disconnect(); } catch {} }
+      if (state.mutationObserver) { try { state.mutationObserver.disconnect(); } catch {} }
+      if (state.resizeHandler) { window.removeEventListener('resize', state.resizeHandler); }
+      if (state.rightRecheckTimer) {
+        clearTimeout(state.rightRecheckTimer);
+        state.rightRecheckTimer = 0;
+      }
+      state.rightRecheckAttempts = 0;
+      state.rightSavedPosition = null;
+      if (state.rightFollowLoopId) {
+        cancelAnimationFrame(state.rightFollowLoopId);
+        state.rightFollowLoopId = 0;
+      }
+      state.leftObserver = null;
+      state.rightObserver = null;
+      state.mutationObserver = null;
+    }
+
+    state.mutationObserver = new MutationObserver(() => scheduleEvaluation('mutation'));
+    try { state.mutationObserver.observe(document.body, { childList: true, subtree: true }); } catch {}
+
+    state.resizeHandler = () => scheduleEvaluation('resize');
+    window.addEventListener('resize', state.resizeHandler, { passive: true });
+
+    scheduleEvaluation('init');
+
+    return {
+      beginUserInteraction,
+      endUserInteraction,
+      notifyExternalPositionChange,
+      scheduleEvaluation,
+      captureManualPositions,
+      destroy
+    };
+  }
+
+  function getVisibleRect(el, minSize) {
+    if (!el) return null;
+    try {
+      const rect = el.getBoundingClientRect();
+      if (!rect) return null;
+      const style = window.getComputedStyle(el);
+      if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return null;
+      if ((rect.width || 0) <= minSize && (rect.height || 0) <= minSize) return null;
+      return rect;
+    } catch { return null; }
+  }
+
+  function findLeftSidebarElement() {
+    const candidates = [
+      document.getElementById('stage-slideover-sidebar'),
+      document.querySelector('nav[aria-label="Chat history"]'),
+      document.querySelector('[data-testid="chat-history"]')
+    ];
+    for (const el of candidates) {
+      if (el) return el;
+    }
+    return null;
+  }
+
+  function findRightPanelElement() {
+    return document.querySelector('section[data-testid="screen-threadFlyOut"]');
+  }
+
+  function overlapsLeft(navRect, panelRect) {
+    return navRect.left < (panelRect.right - 4);
+  }
+
+  function overlapsRight(navRect, panelRect) {
+    return navRect.right > (panelRect.left + 4);
   }
 
   function enableResponsiveClasses(nav) {
@@ -680,8 +1081,11 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
     } catch {}
   }
 
-  function enableDrag(nav) {
+  function enableDrag(nav, opts = {}) {
     const header = nav.querySelector('.compact-header');
+    const onDragStart = typeof opts.onDragStart === 'function' ? opts.onDragStart : null;
+    const onDragMove = typeof opts.onDragMove === 'function' ? opts.onDragMove : null;
+    const onDragEnd = typeof opts.onDragEnd === 'function' ? opts.onDragEnd : null;
     let isDragging = false, startX, startY, startRight, startTop;
     header.addEventListener('mousedown', (e) => {
       if (e.target.closest('.compact-toggle, .compact-refresh, .compact-star')) return;
@@ -689,6 +1093,9 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
       const rect = nav.getBoundingClientRect();
       startTop = rect.top;
       startRight = Math.max(0, window.innerWidth - rect.right);
+      if (onDragStart) {
+        try { onDragStart(e); } catch {}
+      }
       e.preventDefault();
     });
     document.addEventListener('mousemove', (e) => {
@@ -698,8 +1105,17 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
       nav.style.right = `${newRight}px`;
       nav.style.left = 'auto';
       nav.style.top = `${startTop + dy}px`;
+      if (onDragMove) {
+        try { onDragMove(e); } catch {}
+      }
     });
-    document.addEventListener('mouseup', () => { isDragging = false; });
+    document.addEventListener('mouseup', () => {
+      if (!isDragging) return;
+      isDragging = false;
+      if (onDragEnd) {
+        try { onDragEnd(); } catch {}
+      }
+    });
   }
 
   // ===== 检查点与宽度调整 =====
@@ -854,12 +1270,12 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
     } catch {}
   }
 
-  function enableResize(nav) {
+  function enableResize(nav, layout) {
     const handle = document.createElement('div');
     handle.className = 'cgpt-resize-handle';
     nav.appendChild(handle);
 
-    let startX = 0; let startW = 0; let resizing = false; let startRight = 0; let startLeft = 0;
+    let startX = 0; let startW = 0; let resizing = false; let startRight = 0;
     const MIN_W = 100, MAX_W = 480;
 
     const onMove = (e) => {
@@ -876,11 +1292,15 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
     const onUp = (e) => {
       if (!resizing) return;
       resizing = false;
+      nav.classList.remove('cgpt-resizing');
       document.removeEventListener('mousemove', onMove, true);
       document.removeEventListener('mouseup', onUp, true);
       const comp = getComputedStyle(nav);
       const w = parseFloat((comp.getPropertyValue('--cgpt-nav-width') || '').replace('px','')) || nav.getBoundingClientRect().width;
       saveWidth(Math.round(w));
+      if (layout && typeof layout.endUserInteraction === 'function') {
+        try { layout.endUserInteraction(); } catch {}
+      }
     };
 
     handle.addEventListener('mousedown', (e) => {
@@ -890,7 +1310,10 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
       const rect = nav.getBoundingClientRect();
       startW = rect.width;
       startRight = rect.right;
-      startLeft = rect.left;
+      nav.classList.add('cgpt-resizing');
+      if (layout && typeof layout.beginUserInteraction === 'function') {
+        try { layout.beginUserInteraction(); } catch {}
+      }
       document.addEventListener('mousemove', onMove, true);
       document.addEventListener('mouseup', onUp, true);
     }, true);
@@ -900,6 +1323,9 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
       const def = (window.matchMedia && window.matchMedia('(max-width: 768px)').matches) ? 160 : 210;
       nav.style.setProperty('--cgpt-nav-width', `${def}px`);
       saveWidth(def);
+      if (layout && typeof layout.notifyExternalPositionChange === 'function') {
+        try { layout.notifyExternalPositionChange(); } catch {}
+      }
     }, true);
   }
 
@@ -908,6 +1334,15 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
   function renderList(ui) {
     const list = ui.nav.querySelector('.compact-list');
     if (!list) return;
+    const updateScrollbarState = () => {
+      const hasScroll = list.scrollHeight > list.clientHeight + 1;
+      list.classList.toggle('has-scroll', hasScroll);
+      ui.nav.classList.toggle('cgpt-has-scrollbar', hasScroll);
+    };
+    const queueScrollbarState = () => {
+      const raf = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : (cb) => setTimeout(cb, 0);
+      raf(() => updateScrollbarState());
+    };
     const removed = runCheckpointGC(false);
     if (removed) { saveCPSet(); }
     // 清理已失效的收藏（不再存在的消息或图钉）
@@ -916,7 +1351,11 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
     const favRemoved = runFavoritesGC(false, validKeys);
     if (favRemoved) updateStarBtnState(ui);
     const next = filterFav ? nextFull.filter(it => favSet.has(it.key)) : nextFull;
-    if (!next.length) { list.innerHTML = `<div class="compact-empty">${filterFav ? '暂无收藏' : '暂无对话'}</div>`; return; }
+    if (!next.length) {
+      list.innerHTML = `<div class="compact-empty">${filterFav ? '暂无收藏' : '暂无对话'}</div>`;
+      queueScrollbarState();
+      return;
+    }
     list.innerHTML = '';
     for (const item of next) {
       const node = document.createElement('div');
@@ -934,6 +1373,7 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
       node.setAttribute('draggable', 'false');
       list.appendChild(node);
     }
+    queueScrollbarState();
     if (!list._eventBound) {
       list.addEventListener('click', (e) => {
         // 行内收藏切换
