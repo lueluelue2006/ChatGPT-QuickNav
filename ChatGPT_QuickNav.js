@@ -183,13 +183,6 @@
   let currentActiveId = null;
   let __cgptBooting = false;
   let refreshTimer = 0; // 新的尾随去抖定时器
-  // 滚动锁定
-  let scrollLockEnabled = false;
-  let scrollLockPos = 0;
-  let scrollLockScroller = null;
-  let scrollLockUserIntentTs = 0;
-  let scrollLockRestoreRaf = 0;
-  let scrollLockBound = false;
 
   function scheduleRefresh(ui, { delay = 80, force = false } = {}) {
     if (force) {
@@ -593,12 +586,9 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
 .compact-empty { padding:10px; text-align:center; color:var(--cgpt-nav-text-muted); font-size:11px; background:var(--cgpt-nav-panel-bg); border-radius:var(--cgpt-nav-radius-lg); pointer-events:auto; min-height:20px; line-height:1.4; border:1px dashed var(--cgpt-nav-border-muted); }
 
 /* 收藏与锚点 */
-  .compact-star,
-  .compact-lock { background:var(--cgpt-nav-item-bg); border:1px solid var(--cgpt-nav-border-muted); color:var(--cgpt-nav-text-strong); cursor:pointer; width:clamp(20px, calc(var(--cgpt-nav-width, 210px) / 10), 26px); height:clamp(20px, calc(var(--cgpt-nav-width, 210px) / 10), 26px); display:flex; align-items:center; justify-content:center; border-radius:var(--cgpt-nav-radius); transition:all .2s ease; font-weight:600; line-height:1; box-shadow:var(--cgpt-nav-item-shadow); backdrop-filter:saturate(180%) blur(18px); font-size:clamp(12px, calc(var(--cgpt-nav-width, 210px) / 14), 16px); margin-left:4px; }
-  .compact-star:hover,
-  .compact-lock:hover { border-color:var(--cgpt-nav-fav-border); color:var(--cgpt-nav-fav-color); box-shadow:0 4px 14px rgba(147,51,234,0.12); background:var(--cgpt-nav-item-hover-bg); }
+  .compact-star { background:var(--cgpt-nav-item-bg); border:1px solid var(--cgpt-nav-border-muted); color:var(--cgpt-nav-text-strong); cursor:pointer; width:clamp(20px, calc(var(--cgpt-nav-width, 210px) / 10), 26px); height:clamp(20px, calc(var(--cgpt-nav-width, 210px) / 10), 26px); display:flex; align-items:center; justify-content:center; border-radius:var(--cgpt-nav-radius); transition:all .2s ease; font-weight:600; line-height:1; box-shadow:var(--cgpt-nav-item-shadow); backdrop-filter:saturate(180%) blur(18px); font-size:clamp(12px, calc(var(--cgpt-nav-width, 210px) / 14), 16px); margin-left:4px; }
+  .compact-star:hover { border-color:var(--cgpt-nav-fav-border); color:var(--cgpt-nav-fav-color); box-shadow:0 4px 14px rgba(147,51,234,0.12); background:var(--cgpt-nav-item-hover-bg); }
   .compact-star.active { background:var(--cgpt-nav-fav-bg); color:var(--cgpt-nav-fav-color); border-color:var(--cgpt-nav-fav-border); }
-  .compact-lock.active { background:var(--cgpt-nav-accent-subtle); color:var(--cgpt-nav-accent); border-color:var(--cgpt-nav-accent); }
   .fav-toggle { position:absolute; right:calc(6px + var(--cgpt-nav-gutter)); top:2px; border:none; background:transparent; color:var(--cgpt-nav-text-muted); cursor:pointer; font-size:12px; line-height:1; padding:2px; opacity:.7; }
   .fav-toggle:hover { color:var(--cgpt-nav-fav-color); opacity:1; }
   .fav-toggle.active { color:var(--cgpt-nav-fav-color); opacity:1; }
@@ -690,7 +680,6 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
           <button class="compact-toggle" type="button" title="收起/展开"><span class="toggle-text">−</span></button>
           <button class="compact-refresh" type="button" title="刷新对话列表">⟳</button>
           <button class="compact-star" type="button" title="仅显示收藏">☆</button>
-          <button class="compact-lock" type="button" title="锁定滚动：阻止新回复自动拉到底部">🔓</button>
         </div>
       </div>
       <div class="compact-list" role="listbox" aria-label="对话项"></div>
@@ -731,14 +720,6 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
     nav.addEventListener('mousedown', (e) => { if (e.detail > 1) { e.preventDefault(); } }, { capture: true });
 
     const ui = { nav, layout };
-    const lockBtn = nav.querySelector('.compact-lock');
-    if (lockBtn && !lockBtn._bound) {
-      lockBtn.addEventListener('click', () => {
-        toggleScrollLock(ui);
-      });
-      lockBtn._bound = true;
-    }
-    updateLockBtnState(ui);
     nav._ui = ui;
     return ui;
   }
@@ -1133,7 +1114,7 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
     const onDragEnd = typeof opts.onDragEnd === 'function' ? opts.onDragEnd : null;
     let isDragging = false, startX, startY, startRight, startTop;
     header.addEventListener('mousedown', (e) => {
-      if (e.target.closest('.compact-toggle, .compact-refresh, .compact-star, .compact-lock')) return;
+      if (e.target.closest('.compact-toggle, .compact-refresh, .compact-star')) return;
       isDragging = true; startX = e.clientX; startY = e.clientY;
       const rect = nav.getBoundingClientRect();
       startTop = rect.top;
@@ -1930,17 +1911,6 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
     } catch {}
   }
 
-  function updateLockBtnState(ui) {
-    try {
-      const btn = ui.nav.querySelector('.compact-lock');
-      if (!btn) return;
-      const locked = !!scrollLockEnabled;
-      btn.classList.toggle('active', locked);
-      btn.textContent = locked ? '🔒' : '🔓';
-      btn.title = locked ? '滚动已锁定：阻止新回复把页面拉到底部' : '锁定滚动：阻止新回复自动拉到底部';
-    } catch {}
-  }
-
   // 移除不存在于 validKeys 的收藏，返回移除数量
   function runFavoritesGC(saveAfter = false, validKeys = null, onlyPins = false) {
     try {
@@ -2398,79 +2368,6 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
         scheduleRefresh(ui, { force: true });
       }
     });
-  }
-
-  function getScrollTopSafe(sc) {
-    if (!sc) return 0;
-    if (sc === document.documentElement || sc === document.body || sc === (document.scrollingElement || document.documentElement)) {
-      return window.scrollY || document.documentElement.scrollTop || 0;
-    }
-    return sc.scrollTop || 0;
-  }
-
-  function setScrollTopSafe(sc, top) {
-    if (!sc) return;
-    if (sc === document.documentElement || sc === document.body || sc === (document.scrollingElement || document.documentElement)) {
-      window.scrollTo(0, top);
-    } else {
-      sc.scrollTop = top;
-    }
-  }
-
-  function markScrollUserIntent() { scrollLockUserIntentTs = Date.now(); }
-
-  function captureScrollLockBaseline() {
-    scrollLockScroller = getScrollRoot(document.body);
-    scrollLockPos = getScrollTopSafe(scrollLockScroller);
-  }
-
-  function handleScrollLock(e) {
-    if (!scrollLockEnabled) return;
-    if (!scrollLockScroller || !scrollLockScroller.isConnected) captureScrollLockBaseline();
-    const sc = scrollLockScroller || getScrollRoot(document.body);
-    const now = Date.now();
-    const cur = getScrollTopSafe(sc);
-    const isUser = (now - scrollLockUserIntentTs) < 600;
-    if (isUser) {
-      scrollLockPos = cur;
-      return;
-    }
-    if (Math.abs(cur - scrollLockPos) > 1) {
-      if (scrollLockRestoreRaf) cancelAnimationFrame(scrollLockRestoreRaf);
-      scrollLockRestoreRaf = requestAnimationFrame(() => {
-        if (!scrollLockEnabled) return;
-        setScrollTopSafe(sc, scrollLockPos);
-      });
-    }
-  }
-
-  function bindScrollLockGuard() {
-    if (scrollLockBound) return;
-    const userEvents = ['wheel', 'touchstart', 'touchmove', 'mousedown'];
-    userEvents.forEach(ev => document.addEventListener(ev, markScrollUserIntent, { passive: true, capture: true }));
-    document.addEventListener('keydown', (e) => {
-      if (e.metaKey || e.ctrlKey || e.altKey) return;
-      const keys = ['ArrowUp','ArrowDown','PageUp','PageDown','Home','End',' '];
-      if (keys.includes(e.key)) markScrollUserIntent();
-    }, true);
-    document.addEventListener('scroll', handleScrollLock, { passive: true, capture: true });
-    scrollLockBound = true;
-  }
-
-  function setScrollLock(on) {
-    scrollLockEnabled = !!on;
-    if (scrollLockEnabled) {
-      bindScrollLockGuard();
-      captureScrollLockBaseline();
-    } else {
-      if (scrollLockRestoreRaf) cancelAnimationFrame(scrollLockRestoreRaf);
-      scrollLockRestoreRaf = 0;
-    }
-  }
-
-  function toggleScrollLock(ui) {
-    setScrollLock(!scrollLockEnabled);
-    updateLockBtnState(ui);
   }
 
   function onAnyScroll() {
