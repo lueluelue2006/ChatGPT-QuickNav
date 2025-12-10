@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT 对话导航
 // @namespace    http://tampermonkey.net/
-// @version      4.2.1
+// @version      4.3
 // @description  紧凑导航 + 实时定位；修复边界误判；底部纯箭头按钮；回到顶部/到底部单击即用；禁用面板内双击选中；快捷键 Cmd+↑/↓（Mac）或 Alt+↑/↓（Windows）；修复竞态条件和流式输出检测问题；加入标记点📌功能和收藏夹功能（4.0大更新）。感谢loongphy佬适配暗色模式（3.0）+适配左右侧边栏自动跟随（4.1）
 // @author       schweigen, loongphy(在3.0版本帮忙加入暗色模式，在4.1版本中帮忙适配左右侧边栏自动跟随)
 // @license      MIT
@@ -29,6 +29,7 @@
   // 存储键与检查点状态
   const STORE_NS = 'cgpt-quicknav';
   const WIDTH_KEY = `${STORE_NS}:nav-width`;
+  const POS_KEY = `${STORE_NS}:nav-pos`;
   const CP_KEY_PREFIX = `${STORE_NS}:cp:`; // + 会话 key
   const CP_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 检查点保留 30 天
   let cpSet = new Set();          // 仅用于快速 membership（遗留）
@@ -122,6 +123,7 @@
       nav.style.right = '10px';
       nav.style.left = 'auto';
       nav.style.bottom = 'auto';
+      persistNavPosition(nav);
       if (nav._ui && nav._ui.layout && typeof nav._ui.layout.notifyExternalPositionChange === 'function') {
         try { nav._ui.layout.notifyExternalPositionChange(); } catch {}
       }
@@ -689,6 +691,7 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
       </div>
     `;
     document.body.appendChild(nav);
+    applySavedPosition(nav);
     let layout = {
       beginUserInteraction: () => {},
       endUserInteraction: () => {},
@@ -857,6 +860,7 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
       if (state.destroyed) return;
       state.userAdjusting = false;
       captureManualPositions();
+      persistNavPosition(nav);
       scheduleEvaluation('user-adjust');
     }
 
@@ -1289,6 +1293,88 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
     try {
       if (GM_setValue) GM_setValue(WIDTH_KEY, px);
       else localStorage.setItem(WIDTH_KEY, String(px));
+    } catch {}
+  }
+
+  function loadSavedPosition() {
+    try {
+      const raw = GM_getValue ? GM_getValue(POS_KEY, null) : JSON.parse(localStorage.getItem(POS_KEY) || 'null');
+      if (!raw || typeof raw !== 'object') return null;
+      const toNum = (v) => {
+        const n = Number(v);
+        return Number.isFinite(n) ? n : null;
+      };
+      const top = toNum(raw.top);
+      if (!Number.isFinite(top)) return null;
+      const left = toNum(raw.left);
+      const right = toNum(raw.right);
+      const anchor = raw.anchor === 'right' ? 'right' : 'left';
+      return {
+        top,
+        left: Number.isFinite(left) ? left : null,
+        right: Number.isFinite(right) ? right : null,
+        anchor
+      };
+    } catch { return null; }
+  }
+
+  function saveNavPosition(pos) {
+    if (!pos || !Number.isFinite(pos.top)) return;
+    const payload = {
+      top: Math.max(0, pos.top),
+      left: Number.isFinite(pos.left) ? Math.max(0, pos.left) : null,
+      right: Number.isFinite(pos.right) ? Math.max(0, pos.right) : null,
+      anchor: pos.anchor === 'right' ? 'right' : 'left',
+      ts: Date.now()
+    };
+    try {
+      if (GM_setValue) GM_setValue(POS_KEY, payload);
+      else localStorage.setItem(POS_KEY, JSON.stringify(payload));
+    } catch {}
+  }
+
+  function applySavedPosition(nav) {
+    const saved = loadSavedPosition();
+    if (!nav || !saved) return;
+    const vh = Math.max(window.innerHeight || 0, document.documentElement?.clientHeight || 0);
+    const maxTop = Math.max(0, vh - 40);
+    const top = Number.isFinite(saved.top) ? Math.min(Math.max(0, saved.top), maxTop || saved.top) : null;
+    if (Number.isFinite(top)) nav.style.top = `${Math.round(top)}px`;
+    const anchorRight = saved.anchor === 'right';
+    if (anchorRight && Number.isFinite(saved.right)) {
+      nav.style.right = `${Math.round(Math.max(0, saved.right))}px`;
+      nav.style.left = 'auto';
+    } else if (!anchorRight && Number.isFinite(saved.left)) {
+      nav.style.left = `${Math.round(Math.max(0, saved.left))}px`;
+      nav.style.right = 'auto';
+    } else if (Number.isFinite(saved.right)) {
+      nav.style.right = `${Math.round(Math.max(0, saved.right))}px`;
+      nav.style.left = 'auto';
+    } else if (Number.isFinite(saved.left)) {
+      nav.style.left = `${Math.round(Math.max(0, saved.left))}px`;
+      nav.style.right = 'auto';
+    }
+  }
+
+  function persistNavPosition(nav) {
+    if (!nav || !nav.isConnected) return;
+    try {
+      const rect = nav.getBoundingClientRect();
+      const vw = Math.max(window.innerWidth || 0, document.documentElement?.clientWidth || 0);
+      const vh = Math.max(window.innerHeight || 0, document.documentElement?.clientHeight || 0);
+      const centerX = rect.left + (rect.width || 0) / 2;
+      const anchorRight = vw && centerX >= vw / 2;
+      const top = Number.isFinite(rect.top) ? rect.top : 0;
+      const left = Math.max(0, rect.left);
+      const right = Math.max(0, vw - rect.right);
+      const maxTop = Math.max(0, vh - 40);
+      const payload = {
+        top: Math.min(Math.max(0, top), maxTop || top),
+        left: anchorRight ? null : left,
+        right: anchorRight ? right : null,
+        anchor: anchorRight ? 'right' : 'left'
+      };
+      saveNavPosition(payload);
     } catch {}
   }
 
