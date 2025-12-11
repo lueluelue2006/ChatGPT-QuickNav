@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT 对话导航
 // @namespace    http://tampermonkey.net/
-// @version      4.4.1
+// @version      4.4.2
 // @description  紧凑导航 + 实时定位；修复边界误判；底部纯箭头按钮；回到顶部/到底部单击即用；禁用面板内双击选中；快捷键 Cmd+↑/↓（Mac）或 Alt+↑/↓（Windows）；修复竞态条件和流式输出检测问题；加入标记点📌功能和收藏夹功能（4.0大更新）。感谢loongphy佬适配暗色模式（3.0）+适配左右侧边栏自动跟随（4.1）
 // @author       schweigen, loongphy(在3.0版本帮忙加入暗色模式，在4.1版本中帮忙适配左右侧边栏自动跟随)
 // @license      MIT
@@ -613,8 +613,8 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
   .fav-toggle:hover { color:var(--cgpt-nav-fav-color); opacity:1; }
   .fav-toggle.active { color:var(--cgpt-nav-fav-color); opacity:1; }
 /* 锚点占位（绝对定位，不再插入文本流） */
-  .cgpt-pin-anchor { position:absolute; width:24px; height:24px; display:flex; align-items:center; justify-content:center; transform:translate(-50%,-50%); pointer-events:auto; user-select:none; -webkit-user-select:none; caret-color:transparent; cursor:default; z-index:2; }
-  .cgpt-pin-anchor::after { content:'📌'; font-size:22px; line-height:1; opacity:.85; color:var(--cgpt-nav-pin-color); transition:opacity .18s ease, transform .18s ease; filter: drop-shadow(0 1px 1px rgba(0,0,0,0.35)); }
+  .cgpt-pin-anchor { position:absolute; width:32px; height:32px; display:flex; align-items:center; justify-content:center; transform:translate(-50%,-50%); pointer-events:auto; user-select:none; -webkit-user-select:none; caret-color:transparent; cursor:default; z-index:2; }
+  .cgpt-pin-anchor::after { content:'📌'; font-size:28px; line-height:1; opacity:.9; color:var(--cgpt-nav-pin-color); transition:opacity .18s ease, transform .18s ease; filter: drop-shadow(0 2px 2px rgba(0,0,0,0.45)); }
   .cgpt-pin-anchor:hover::after { opacity:1; transform:translateY(-1px); }
   .cgpt-pin-host { position: relative; }
 
