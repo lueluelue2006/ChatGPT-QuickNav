@@ -613,8 +613,8 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
   .fav-toggle:hover { color:var(--cgpt-nav-fav-color); opacity:1; }
   .fav-toggle.active { color:var(--cgpt-nav-fav-color); opacity:1; }
 /* 锚点占位 */
-  .cgpt-pin-anchor { display:inline-block; width:0; height:0; margin:0; padding:0; border:0; outline:0; overflow:visible; vertical-align:middle; }
-  .cgpt-pin-anchor::after { content:'📌'; font-size:2.4em; line-height:1; margin-left:4px; opacity:.65; color:var(--cgpt-nav-pin-color); cursor:pointer; }
+  .cgpt-pin-anchor { display:inline-flex; width:1em; height:1em; margin:0 2px; padding:0; border:0; outline:0; overflow:visible; vertical-align:middle; align-items:center; justify-content:center; user-select:none; -webkit-user-select:none; caret-color:transparent; cursor:default; }
+  .cgpt-pin-anchor::after { content:'📌'; font-size:1.4em; line-height:1; opacity:.7; color:var(--cgpt-nav-pin-color); transition:opacity .18s ease, transform .18s ease; }
   .cgpt-pin-anchor:hover::after { opacity:1; transform:translateY(-1px); }
 
 /* 调整宽度手柄 */
@@ -2324,6 +2324,15 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
   // 绑定 Option+单击 添加📌
   function bindAltPin(ui) {
     if (window.__cgptPinBound) return;
+    // 非 Alt 点击锚点：阻止默认，避免文本选中/抖动
+    document.addEventListener('mousedown', (e) => {
+      const anc = e.target && e.target.closest && e.target.closest('.cgpt-pin-anchor');
+      if (anc && !e.altKey) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    }, true);
+
     const onClick = (e) => {
       try {
         if (!e.altKey || e.button !== 0) return;
