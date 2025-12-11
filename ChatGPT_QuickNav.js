@@ -613,8 +613,8 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
   .fav-toggle:hover { color:var(--cgpt-nav-fav-color); opacity:1; }
   .fav-toggle.active { color:var(--cgpt-nav-fav-color); opacity:1; }
 /* 锚点占位（绝对定位，不再插入文本流） */
-  .cgpt-pin-anchor { position:absolute; width:20px; height:20px; display:flex; align-items:center; justify-content:center; transform:translate(-50%,-50%); pointer-events:auto; user-select:none; -webkit-user-select:none; caret-color:transparent; cursor:default; z-index:2; }
-  .cgpt-pin-anchor::after { content:'📌'; font-size:18px; line-height:1; opacity:.8; color:var(--cgpt-nav-pin-color); transition:opacity .18s ease, transform .18s ease; filter: drop-shadow(0 1px 1px rgba(0,0,0,0.35)); }
+  .cgpt-pin-anchor { position:absolute; width:24px; height:24px; display:flex; align-items:center; justify-content:center; transform:translate(-50%,-50%); pointer-events:auto; user-select:none; -webkit-user-select:none; caret-color:transparent; cursor:default; z-index:2; }
+  .cgpt-pin-anchor::after { content:'📌'; font-size:22px; line-height:1; opacity:.85; color:var(--cgpt-nav-pin-color); transition:opacity .18s ease, transform .18s ease; filter: drop-shadow(0 1px 1px rgba(0,0,0,0.35)); }
   .cgpt-pin-anchor:hover::after { opacity:1; transform:translateY(-1px); }
   .cgpt-pin-host { position: relative; }
 
