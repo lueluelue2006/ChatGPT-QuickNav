@@ -612,10 +612,11 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
   .fav-toggle { position:absolute; right:calc(6px + var(--cgpt-nav-gutter)); top:2px; border:none; background:transparent; color:var(--cgpt-nav-text-muted); cursor:pointer; font-size:12px; line-height:1; padding:2px; opacity:.7; }
   .fav-toggle:hover { color:var(--cgpt-nav-fav-color); opacity:1; }
   .fav-toggle.active { color:var(--cgpt-nav-fav-color); opacity:1; }
-/* 锚点占位 */
-  .cgpt-pin-anchor { display:inline-flex; width:1em; height:1em; margin:0 2px; padding:0; border:0; outline:0; overflow:visible; vertical-align:middle; align-items:center; justify-content:center; user-select:none; -webkit-user-select:none; caret-color:transparent; cursor:default; }
-  .cgpt-pin-anchor::after { content:'📌'; font-size:1.4em; line-height:1; opacity:.7; color:var(--cgpt-nav-pin-color); transition:opacity .18s ease, transform .18s ease; }
+/* 锚点占位（绝对定位，不再插入文本流） */
+  .cgpt-pin-anchor { position:absolute; width:20px; height:20px; display:flex; align-items:center; justify-content:center; transform:translate(-50%,-50%); pointer-events:auto; user-select:none; -webkit-user-select:none; caret-color:transparent; cursor:default; z-index:2; }
+  .cgpt-pin-anchor::after { content:'📌'; font-size:18px; line-height:1; opacity:.8; color:var(--cgpt-nav-pin-color); transition:opacity .18s ease, transform .18s ease; filter: drop-shadow(0 1px 1px rgba(0,0,0,0.35)); }
   .cgpt-pin-anchor:hover::after { opacity:1; transform:translateY(-1px); }
+  .cgpt-pin-host { position: relative; }
 
 /* 调整宽度手柄 */
 .cgpt-resize-handle { position:absolute; left:-5px; top:0; bottom:0; width:8px; cursor:ew-resize; background:transparent; }
@@ -1621,65 +1622,50 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
 
   function resolvePinAnchor(meta) {
     try {
-      const { msgKey, frac, ctx } = meta;
+      const { msgKey, frac, ctx, rel } = meta;
       const turn = findTurnByKey(msgKey);
       if (!turn) return null;
-      const id = `cgpt-pin-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,6)}`;
+      const host = ensurePinHost(turn);
+      if (!host) return null;
+      const id = meta.anchorId || `cgpt-pin-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,6)}`;
       const span = document.createElement('span');
       span.id = id;
       span.className = 'cgpt-pin-anchor';
 
-      // 1) 优先：按路径+偏移恢复
-      if (ctx && ctx.p != null) {
-        const el = resolveElementPath(turn, ctx.p);
-        if (el) {
-          const r = createCollapsedRangeAtElementOffset(el, ctx.o || 0);
-          try {
-            r.insertNode(span);
-            // 自愈：补齐旧数据缺失的 ctx/frac
-            if (!meta.ctx) meta.ctx = { p: ctx.p, o: ctx.o || 0 };
-            if (typeof meta.frac !== 'number') {
-              const measureEl = getTurnMeasureEl(turn);
-              const mrect = measureEl.getBoundingClientRect();
-              const sr = span.getBoundingClientRect();
-              const h = Math.max(1, mrect.height || 1);
-              meta.frac = h ? Math.max(0, Math.min(1, (sr.top - mrect.top) / h)) : 0.0;
+      let rx = null, ry = null;
+      if (rel && typeof rel.x === 'number' && typeof rel.y === 'number') {
+        rx = rel.x; ry = rel.y;
+      }
+      if (!Number.isFinite(ry)) {
+        const measureEl = getTurnMeasureEl(turn) || host;
+        const mrect = measureEl.getBoundingClientRect();
+        const f = Math.max(0, Math.min(1, typeof frac === 'number' ? frac : 0.0));
+        ry = f;
+        rx = rx ?? 0.5;
+        // 若有 ctx，可尝试从路径找目标元素中心
+        if (ctx && ctx.p != null) {
+          const el = resolveElementPath(turn, ctx.p);
+          if (el) {
+            const r = el.getBoundingClientRect();
+            if (r && r.width && r.height) {
+              const fx = Math.max(0, Math.min(1, (r.left + r.width * 0.5 - mrect.left) / Math.max(1, mrect.width)));
+              const fy = Math.max(0, Math.min(1, (r.top + r.height * 0.5 - mrect.top) / Math.max(1, mrect.height)));
+              rx = rx ?? fx;
+              ry = Number.isFinite(ry) ? ry : fy;
             }
-            return id;
-          } catch {}
+          }
         }
+        meta.frac = ry;
+        meta.rel = { x: rx ?? 0.5, y: ry };
+      } else {
+        meta.rel = { x: rx, y: ry };
       }
 
-      // 2) 其次：按 frac 在内容容器内恢复
-      const measureEl = getTurnMeasureEl(turn);
-      const mrect = measureEl.getBoundingClientRect();
-      const f = Math.max(0, Math.min(1, typeof frac === 'number' ? frac : 0.0));
-      const targetY = mrect.top + f * Math.max(1, mrect.height);
-      const targetX = mrect.left + Math.max(4, mrect.width * 0.5);
-      const r2 = findNearestCharRange(measureEl, targetX, targetY) || findNearestCharRange(turn, targetX, targetY);
-      if (r2) {
-        try {
-          r2.insertNode(span);
-          // 自愈：为缺失信息的旧数据补齐 ctx/frac
-          meta.frac = f;
-          try { meta.ctx = extractRangeInfo(r2, turn) || meta.ctx || null; } catch {}
-          return id;
-        } catch {}
-      }
-
-      // 3) 最后兜底
-      const target = findNodeAtYWithin(turn, targetY) || findTurnAnchor(turn) || turn;
-      try {
-        target.parentNode?.insertBefore(span, target);
-        // 兜底也尽量记录一个 frac 值
-        try {
-          const sr = span.getBoundingClientRect();
-          const h = Math.max(1, mrect.height || 1);
-          meta.frac = h ? Math.max(0, Math.min(1, (sr.top - mrect.top) / h)) : (typeof meta.frac === 'number' ? meta.frac : 0.0);
-        } catch {}
-        return id;
-      } catch {}
-      try { turn.appendChild(span); return id; } catch {}
+      span.style.left = `${Math.max(0, Math.min(100, (rx ?? 0.5) * 100))}%`;
+      span.style.top = `${Math.max(0, Math.min(100, (ry ?? 0) * 100))}%`;
+      host.appendChild(span);
+      meta.anchorId = id;
+      return id;
     } catch {}
     return null;
   }
@@ -2374,7 +2360,7 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
 
         // 保存📌
         const pinId = `pin-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,6)}`;
-        const meta = { msgKey, anchorId: anchor.id, frac: anchor.frac, created: Date.now(), ctx: anchor.ctx || null };
+        const meta = { msgKey, anchorId: anchor.id, frac: anchor.frac, created: Date.now(), ctx: anchor.ctx || null, rel: anchor.rel || null };
         try { if (!cpMap || !(cpMap instanceof Map)) loadCPSet(); } catch {}
         cpMap.set(pinId, meta);
         try { const ae = document.getElementById(meta.anchorId); if (ae) ae.setAttribute('data-pin-id', pinId); } catch {}
@@ -2492,39 +2478,21 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
   }
 
   function insertPinAnchorAtPoint(x, y, turnEl) {
-    const range = caretRangeFromPoint(x, y);
     const id = `cgpt-pin-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,6)}`;
+    const host = ensurePinHost(turnEl);
+    if (!host) return null;
     const span = document.createElement('span');
     span.id = id;
     span.className = 'cgpt-pin-anchor';
-    let frac = 0.0;
-    const measureEl = getTurnMeasureEl(turnEl);
-    const rect = measureEl.getBoundingClientRect();
-    if (rect && rect.height > 0) {
-      frac = Math.max(0, Math.min(1, (y - rect.top) / rect.height));
-    }
-    let usedRange = null;
-    try {
-      if (range && turnEl.contains(range.startContainer)) {
-        usedRange = range;
-      }
-    } catch {}
-    // 改进：在点击点下的最深元素中寻找最近字符
-    const deep = deepestDescendantAtPointWithin(turnEl, x, y) || turnEl;
-    const r2 = usedRange ? null : (findNearestCharRange(deep, x, y) || findNearestCharRange(turnEl, x, y));
-    if (r2) usedRange = r2;
-    if (usedRange) {
-      try {
-        const info = extractRangeInfo(usedRange, turnEl);
-        usedRange.insertNode(span);
-        return { id, frac, ctx: info };
-      } catch {}
-    }
-    // 退化：插入到消息内容靠前位置
-    const anchorTarget = findTurnAnchor(turnEl) || turnEl;
-    try { anchorTarget.parentNode?.insertBefore(span, anchorTarget); return { id, frac, ctx: null }; } catch {}
-    try { turnEl.appendChild(span); return { id, frac, ctx: null }; } catch {}
-    return null;
+    const rect = host.getBoundingClientRect();
+    const w = Math.max(1, rect.width);
+    const h = Math.max(1, rect.height);
+    const rx = Math.max(0, Math.min(1, (x - rect.left) / w));
+    const ry = Math.max(0, Math.min(1, (y - rect.top) / h));
+    span.style.left = `${(rx * 100).toFixed(3)}%`;
+    span.style.top = `${(ry * 100).toFixed(3)}%`;
+    host.appendChild(span);
+    return { id, frac: ry, ctx: null, rel: { x: rx, y: ry } };
   }
 
   function getTurnMeasureEl(turnEl) {
@@ -2547,6 +2515,20 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
       }
     }
     return best || turnEl;
+  }
+
+  function ensurePinHost(turnEl) {
+    const host = getTurnMeasureEl(turnEl) || turnEl;
+    if (!host) return null;
+    try {
+      const cs = getComputedStyle(host);
+      if (cs.position === 'static') {
+        host.style.position = 'relative';
+      }
+    } catch {
+      try { host.style.position = 'relative'; } catch {}
+    }
+    return host;
   }
 
   function extractRangeInfo(range, turnEl) {
