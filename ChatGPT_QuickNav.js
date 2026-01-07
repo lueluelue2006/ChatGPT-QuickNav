@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT 对话导航
 // @namespace    http://tampermonkey.net/
-// @version      4.4.3
+// @version      4.5.0
 // @description  紧凑导航 + 实时定位；修复边界误判；底部纯箭头按钮；回到顶部/到底部单击即用；禁用面板内双击选中；快捷键 Cmd+↑/↓（Mac）或 Alt+↑/↓（Windows）；修复竞态条件和流式输出检测问题；加入标记点📌功能和收藏夹功能（4.0大更新）。感谢loongphy佬适配暗色模式（3.0）+适配左右侧边栏自动跟随（4.1）
 // @author       schweigen, loongphy(在3.0版本帮忙加入暗色模式，在4.1版本中帮忙适配左右侧边栏自动跟随)
 // @license      MIT
@@ -26,6 +26,7 @@
   const BOUNDARY_EPS = 28;
   const DEFAULT_FOLLOW_MARGIN = Math.max(CONFIG.anchorOffset || 8, 12);
   const DEBUG = false;
+  const TAIL_RECALC_TURNS = 2; // 仅重算末尾预览（流式输出期间变化最多）
   // 存储键与检查点状态
   const STORE_NS = 'cgpt-quicknav';
   const WIDTH_KEY = `${STORE_NS}:nav-width`;
@@ -195,11 +196,19 @@
   let pending = false, rafId = null, idleId = null;
   let forceRefreshTimer = null;
   let lastTurnCount = 0;
+  let lastDomTurnCount = 0;
   let TURN_SELECTOR = null;
   let scrollTicking = false;
   let currentActiveId = null;
+  let currentActiveTurnPos = 0; // 当前激活 turn 在 qsTurns() 里的位置，用于减少扫描
   let __cgptBooting = false;
   let refreshTimer = 0; // 新的尾随去抖定时器
+
+  // 性能缓存：避免长对话频繁扫描/强制重排
+  const previewCache = new Map(); // msgKey -> preview
+  const roleCache = new Map(); // msgKey -> 'user' | 'assistant'
+  const turnIdToPos = new Map(); // turnId -> position in cachedTurns
+  let cachedTurns = [];
 
   function scheduleRefresh(ui, { delay = 80, force = false } = {}) {
     if (force) {
@@ -310,6 +319,12 @@
       window.__cgptKeysBound = false;
       lastTurnCount = 0;
       TURN_SELECTOR = null; // 同时重置选择器缓存
+      previewCache.clear();
+      roleCache.clear();
+      turnIdToPos.clear();
+      cachedTurns = [];
+      lastDomTurnCount = 0;
+      currentActiveTurnPos = 0;
       setTimeout(init, 100);
     }
   }
@@ -323,7 +338,12 @@
   else init();
 
   function qsTurns(root = document) {
-    if (TURN_SELECTOR) return Array.from(root.querySelectorAll(TURN_SELECTOR));
+    if (TURN_SELECTOR) {
+      const els = root.querySelectorAll(TURN_SELECTOR);
+      if (els.length) return Array.from(els);
+      // 选择器失效则自动回退重选，避免每次 mutation 都清空缓存
+      TURN_SELECTOR = null;
+    }
     const selectors = [
       // 原有选择器
       'article[data-testid^="conversation-turn-"]',
@@ -411,7 +431,8 @@
 
   function getTextPreview(el) {
     if (!el) return '';
-    const text = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+    // 注意：innerText 会触发同步样式/布局计算（长对话非常慢），尽量只用 textContent
+    const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
     if (!text) return '...';
     // 让 CSS 负责根据宽度省略，JS 只做上限裁剪以防极端超长文本
     const HARD_CAP = 600;
@@ -420,6 +441,9 @@
 
   function buildIndex() {
     const turns = qsTurns();
+    cachedTurns = turns;
+    lastDomTurnCount = turns.length;
+    turnIdToPos.clear();
     if (!turns.length) {
       if (DEBUG || window.DEBUG_TEMP) console.log('ChatGPT Navigation: 没有找到任何对话元素');
       return [];
@@ -431,19 +455,30 @@
     const list = [];
     for (let i = 0; i < turns.length; i++) {
       const el = turns[i];
-      el.setAttribute('data-cgpt-turn', '1');
+      if (el.getAttribute('data-cgpt-turn') !== '1') el.setAttribute('data-cgpt-turn', '1');
       const attrTestId = el.getAttribute('data-testid') || '';
+      if (!el.id) el.id = `cgpt-turn-${i + 1}`;
+      turnIdToPos.set(el.id, i);
 
-      const isUser = !!(
-        el.querySelector('[data-message-author-role="user"]') ||
-        el.querySelector('.text-message[data-author="user"]') ||
-        attrTestId.includes('user')
-      );
-      const isAssistant = !!(
-        el.querySelector('[data-message-author-role="assistant"]') ||
-        el.querySelector('.text-message[data-author="assistant"]') ||
-        attrTestId.includes('assistant')
-      );
+      const msgKey = el.getAttribute('data-message-id') || el.getAttribute('data-testid') || el.id;
+      let role = roleCache.get(msgKey) || '';
+
+      let isUser = role === 'user';
+      let isAssistant = role === 'assistant';
+      if (!isUser && !isAssistant) {
+        isUser = !!(
+          el.querySelector('[data-message-author-role="user"]') ||
+          el.querySelector('.text-message[data-author="user"]') ||
+          attrTestId.includes('user')
+        );
+        isAssistant = !!(
+          el.querySelector('[data-message-author-role="assistant"]') ||
+          el.querySelector('.text-message[data-author="assistant"]') ||
+          attrTestId.includes('assistant')
+        );
+        role = isUser ? 'user' : (isAssistant ? 'assistant' : '');
+        if (role) roleCache.set(msgKey, role);
+      }
 
       if (DEBUG && i < 3) {
         console.log(`ChatGPT Navigation Debug - 元素 ${i}:`, {
@@ -464,27 +499,30 @@
         });
       }
 
-      let block = null;
-      if (isUser) {
-        block = el.querySelector('[data-message-author-role="user"] .whitespace-pre-wrap, [data-message-author-role="user"] div[data-message-content-part], [data-message-author-role="user"] .prose, div[data-message-author-role="user"] p, .text-message[data-author="user"]');
-      } else if (isAssistant) {
-        block = el.querySelector('.deep-research-result, .border-token-border-sharp .markdown, [data-message-author-role="assistant"] .markdown, [data-message-author-role="assistant"] .prose, [data-message-author-role="assistant"] div[data-message-content-part], div[data-message-author-role="assistant"] p, .text-message[data-author="assistant"]');
-      } else {
+      if (!isUser && !isAssistant) {
         if (DEBUG && i < 5) console.log(`ChatGPT Navigation: 元素 ${i} 角色识别失败`);
         continue;
       }
 
-      const preview = getTextPreview(block);
+      const shouldRecalcPreview = i >= turns.length - TAIL_RECALC_TURNS;
+      let preview = previewCache.get(msgKey) || '';
+      if (!preview || shouldRecalcPreview) {
+        let block = null;
+        if (isUser) {
+          block = el.querySelector('[data-message-author-role="user"] .whitespace-pre-wrap, [data-message-author-role="user"] div[data-message-content-part], [data-message-author-role="user"] .prose, div[data-message-author-role="user"] p, .text-message[data-author="user"]');
+        } else {
+          block = el.querySelector('.deep-research-result, .border-token-border-sharp .markdown, [data-message-author-role="assistant"] .markdown, [data-message-author-role="assistant"] .prose, [data-message-author-role="assistant"] div[data-message-content-part], div[data-message-author-role="assistant"] p, .text-message[data-author="assistant"]');
+        }
+        preview = getTextPreview(block);
+        if (preview) previewCache.set(msgKey, preview);
+      }
       if (!preview) {
         if (DEBUG && i < 5) console.log(`ChatGPT Navigation: 元素 ${i} 无法提取预览文本`);
         continue;
       }
 
-      if (!el.id) el.id = `cgpt-turn-${i + 1}`;
-      const role = isUser ? 'user' : 'assistant';
       const seq = isUser ? ++u : ++a;
-      const msgKey = el.getAttribute('data-message-id') || el.getAttribute('data-testid') || el.id;
-      list.push({ id: el.id, key: msgKey, idx: i, role, preview, seq });
+      list.push({ id: el.id, key: msgKey, idx: i, role: isUser ? 'user' : 'assistant', preview, seq });
     }
 
     if (DEBUG) console.log(`ChatGPT Navigation: 成功识别 ${list.length} 个对话 (用户: ${u}, 助手: ${a})`);
@@ -1487,6 +1525,7 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
       return;
     }
     list.innerHTML = '';
+    const frag = document.createDocumentFragment();
     for (const item of next) {
       const node = document.createElement('div');
       const fav = favSet.has(item.key);
@@ -1501,8 +1540,9 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
         node.innerHTML = `<span class="compact-number">${item.idx + 1}.</span><span class="compact-text" title="${escapeAttr(item.preview)}">${escapeHtml(item.preview)}</span><button class="fav-toggle ${fav ? 'active' : ''}" type="button" title="收藏/取消收藏">★</button>`;
       }
       node.setAttribute('draggable', 'false');
-      list.appendChild(node);
+      frag.appendChild(node);
     }
+    list.appendChild(frag);
     queueScrollbarState();
     if (!list._eventBound) {
       list.addEventListener('click', (e) => {
@@ -2017,10 +2057,9 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
           t.closest('[data-message-id]') ||
           t.closest('.markdown') || t.closest('.prose')
         ) {
-          // 避免 selector 过期：每次真正刷新前，清掉缓存
-          TURN_SELECTOR = null;
           handleScrollLockMutations(muts);
-          scheduleRefresh(ui, { delay: 80 });
+          const isLongChat = (lastDomTurnCount || 0) > 120;
+          scheduleRefresh(ui, { delay: isLongChat ? 180 : 80 });
           return;
         }
       }
@@ -2041,8 +2080,10 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
     // 定期兜底（10s 一次，别等 30s）
     if (forceRefreshTimer) clearInterval(forceRefreshTimer);
     forceRefreshTimer = setInterval(() => {
-      TURN_SELECTOR = null;
-      scheduleRefresh(ui, { force: true });
+      const hasStop = !!document.querySelector('[data-testid="stop-button"]');
+      const count = qsTurns().length;
+      if (!hasStop && count === lastDomTurnCount) return;
+      scheduleRefresh(ui, { force: hasStop });
     }, 10000);
     ui._forceRefreshTimer = forceRefreshTimer;
   }
@@ -2606,10 +2647,12 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
   function startBurstRefresh(ui, ms = 6000, step = 160) {
     const end = Date.now() + ms;
     const STOP_BTN = '[data-testid="stop-button"]'; // 生成中按钮
+    const isLongChat = (lastDomTurnCount || 0) > 120;
+    const tickStep = isLongChat ? Math.max(step, 420) : step;
     const tick = () => {
       scheduleRefresh(ui, { force: true });
       if (Date.now() < end && document.querySelector(STOP_BTN)) {
-        setTimeout(tick, step);
+        setTimeout(tick, tickStep);
       }
     };
     tick();
@@ -2691,8 +2734,12 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
   }
 
   function findNearNextTop(y, eps) {
-    for (const item of cacheIndex) {
-      const el = document.getElementById(item.id);
+    const turns = cachedTurns && cachedTurns.length ? cachedTurns : qsTurns();
+    if (!turns || !turns.length) return null;
+    const start = Math.max(0, (currentActiveTurnPos || 0) - 3);
+    const maxChecks = 30;
+    for (let i = start, checked = 0; i < turns.length && checked < maxChecks; i++, checked++) {
+      const el = turns[i];
       if (!el) continue;
       const r = el.getBoundingClientRect();
       const d = r.top - y;
@@ -2705,6 +2752,7 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
   function setActiveTurn(id) {
     if (!id || currentActiveId === id) return;
     currentActiveId = id;
+    currentActiveTurnPos = turnIdToPos.get(id) ?? currentActiveTurnPos;
     const list = document.querySelector('#cgpt-compact-nav .compact-list');
     if (!list) return;
     list.querySelectorAll('.compact-item.active').forEach(n => n.classList.remove('active'));
