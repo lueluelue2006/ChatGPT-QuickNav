@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT 对话导航
 // @namespace    http://tampermonkey.net/
-// @version      4.5.0
+// @version      4.5.1
 // @description  紧凑导航 + 实时定位；修复边界误判；底部纯箭头按钮；回到顶部/到底部单击即用；禁用面板内双击选中；快捷键 Cmd+↑/↓（Mac）或 Alt+↑/↓（Windows）；修复竞态条件和流式输出检测问题；加入标记点📌功能和收藏夹功能（4.0大更新）。感谢loongphy佬适配暗色模式（3.0）+适配左右侧边栏自动跟随（4.1）
 // @author       schweigen, loongphy(在3.0版本帮忙加入暗色模式，在4.1版本中帮忙适配左右侧边栏自动跟随)
 // @license      MIT
@@ -50,12 +50,15 @@
   let scrollLockScrollEl = null;
   let scrollLockBoundTarget = null;
   let scrollLockLastUserTs = 0;
+  let scrollLockLastUserIntentTs = 0;
   let scrollLockLastMutationTs = 0;
   let scrollLockLastPos = 0;
   let scrollLockStablePos = 0; // 用户视角的基准位置
   let scrollLockRestoreTimer = 0;
   let scrollLockRestoring = false;
   let scrollLockGuardUntil = 0;
+  let scrollLockPointerActive = false;
+  let navAllowScrollDepth = 0;
   let ORIGINAL_SCROLL_INTO_VIEW = null;
   let ORIGINAL_SCROLL_TO = null;
   let ORIGINAL_SCROLL_BY = null;
@@ -2148,6 +2151,7 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
     const now = Date.now();
     const pos = getScrollPos(sc);
     const guardActive = scrollLockEnabled && now < scrollLockGuardUntil;
+    const recentUserIntent = (now - (scrollLockLastUserIntentTs || 0)) <= 350 || !!scrollLockPointerActive;
 
     // 若当前处于“回弹”窗口且是向下的自动滚动，立刻拉回
     if (!scrollLockRestoring && guardActive && (now - scrollLockLastUserTs) > SCROLL_LOCK_IDLE_MS && pos > scrollLockStablePos + SCROLL_LOCK_DRIFT) {
@@ -2160,7 +2164,7 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
     if (scrollLockRestoring) return;
 
     // 用户主动滚动：更新基准
-    const userLikely = !guardActive || (now - scrollLockLastMutationTs > 400) || pos < scrollLockStablePos - SCROLL_LOCK_DRIFT;
+    const userLikely = !guardActive || recentUserIntent || pos < scrollLockStablePos - SCROLL_LOCK_DRIFT;
     if (userLikely) {
       scrollLockLastUserTs = now;
       scrollLockStablePos = pos;
@@ -2195,9 +2199,76 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
   }
 
   function allowNavScrollFor(ms = 600) {
-    const prev = window.__cgptNavAllowScroll;
+    navAllowScrollDepth = Math.max(0, (navAllowScrollDepth || 0) + 1);
     window.__cgptNavAllowScroll = true;
-    setTimeout(() => { window.__cgptNavAllowScroll = prev; }, ms);
+    setTimeout(() => {
+      navAllowScrollDepth = Math.max(0, (navAllowScrollDepth || 0) - 1);
+      if (navAllowScrollDepth === 0) window.__cgptNavAllowScroll = false;
+    }, ms);
+  }
+
+  function isConversationElement(el) {
+    try {
+      if (!el || el.nodeType !== 1) return false;
+      return !!el.closest(
+        '[data-testid="conversation-turns"], [data-message-author-role], [data-message-id], [data-testid^="conversation-turn-"], [data-testid*="conversation-turn"], main[role="main"], [role="main"]'
+      );
+    } catch { return false; }
+  }
+
+  function isProbablyScrollbarGrab(e, scroller) {
+    try {
+      if (!e || !scroller || isWindowScroller(scroller)) return false;
+      const rect = scroller.getBoundingClientRect();
+      const x = e.clientX, y = e.clientY;
+      if (!(x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom)) return false;
+      // 给滚动条留一个较宽的“可抓取区域”，避免 overlay scrollbar 抓不住
+      return x >= rect.right - 26;
+    } catch { return false; }
+  }
+
+  function bindScrollLockUserIntents() {
+    if (window.__cgptScrollLockUserIntentsBound) return;
+    window.__cgptScrollLockUserIntentsBound = true;
+
+    const ignoreIfInNav = (t) => !!(t && t.closest && t.closest('#cgpt-compact-nav'));
+    const mark = (e) => {
+      if (!scrollLockEnabled) return;
+      if (ignoreIfInNav(e?.target)) return;
+      scrollLockLastUserIntentTs = Date.now();
+    };
+
+    document.addEventListener('wheel', mark, { passive: true, capture: true });
+    document.addEventListener('touchstart', mark, { passive: true, capture: true });
+    document.addEventListener('touchmove', mark, { passive: true, capture: true });
+    document.addEventListener('keydown', (e) => {
+      try {
+        if (!scrollLockEnabled) return;
+        if (ignoreIfInNav(e?.target)) return;
+        const t = e.target;
+        if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+        const k = e.key;
+        if (k === 'PageDown' || k === 'PageUp' || k === 'End' || k === 'Home' || k === 'ArrowDown' || k === 'ArrowUp' || k === ' ') {
+          scrollLockLastUserIntentTs = Date.now();
+        }
+      } catch {}
+    }, true);
+
+    document.addEventListener('pointerdown', (e) => {
+      try {
+        if (!scrollLockEnabled) return;
+        if (ignoreIfInNav(e?.target)) return;
+        if (e.button !== 0) return;
+        const sc = scrollLockScrollEl || getChatScrollContainer();
+        if (isProbablyScrollbarGrab(e, sc)) {
+          scrollLockPointerActive = true;
+          scrollLockLastUserIntentTs = Date.now();
+        }
+      } catch {}
+    }, true);
+    const clearPointer = () => { scrollLockPointerActive = false; };
+    document.addEventListener('pointerup', clearPointer, true);
+    document.addEventListener('pointercancel', clearPointer, true);
   }
 
   function shouldBlockScrollFor(target) {
@@ -2206,7 +2277,8 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
     const sc = getChatScrollContainer();
     if (!sc) return false;
     if (scrollLockGuardUntil && Date.now() > scrollLockGuardUntil && (Date.now() - scrollLockLastUserTs) < 200) return false;
-    try { return sc.contains(target); } catch { return false; }
+    if (isWindowScroller(sc)) return isConversationElement(target);
+    try { return sc.contains(target); } catch { return isConversationElement(target); }
   }
 
   function shouldBlockWindowScroll(nextTop) {
@@ -2280,6 +2352,7 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
     scrollLockEnabled = loadScrollLockState();
     ensureScrollLockBindings();
     updateLockBtnState(ui.nav);
+    bindScrollLockUserIntents();
     const lockBtn = ui.nav.querySelector('.compact-lock');
     if (lockBtn) {
       lockBtn.addEventListener('click', (e) => {
