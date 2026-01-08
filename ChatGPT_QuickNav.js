@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT 对话导航
 // @namespace    http://tampermonkey.net/
-// @version      4.6.5
+// @version      4.6.6
 // @description  紧凑导航 + 实时定位；修复边界误判；底部纯箭头按钮；回到顶部/到底部单击即用；禁用面板内双击选中；快捷键 Cmd+↑/↓（Mac）或 Alt+↑/↓（Windows）；修复竞态条件和流式输出检测问题；加入标记点📌功能和收藏夹功能（4.0大更新）。感谢loongphy佬适配暗色模式（3.0）+适配左右侧边栏自动跟随（4.1）
 // @author       schweigen, loongphy(在3.0版本帮忙加入暗色模式，在4.1版本中帮忙适配左右侧边栏自动跟随)
 // @license      MIT
@@ -2884,6 +2884,15 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
   }
 
   function watchSendEvents(ui) {
+    const isComposerForm = (form) => {
+      try {
+        if (!form || typeof form.querySelector !== 'function') return false;
+        return !!(form.querySelector('#prompt-textarea') || form.querySelector('textarea[name="prompt-textarea"]'));
+      } catch {
+        return false;
+      }
+    };
+
     // 点击发送按钮
     document.addEventListener('click', (e) => {
       if (e.target && e.target.closest && e.target.closest('[data-testid="send-button"]')) {
@@ -2891,6 +2900,15 @@ body[data-theme='light'] #cgpt-compact-nav { color-scheme: light; }
         armScrollLockGuard(2200);
         startBurstRefresh(ui);
       }
+    }, true);
+
+    // 表单提交（覆盖 Enter 发送等路径）
+    document.addEventListener('submit', (e) => {
+      const form = e?.target;
+      if (!isComposerForm(form)) return;
+      if (DEBUG || window.DEBUG_TEMP) console.log('ChatGPT Navigation: 检测到表单提交，启动突发刷新');
+      armScrollLockGuard(2200);
+      startBurstRefresh(ui);
     }, true);
 
     // ⌘/Ctrl + Enter 发送
